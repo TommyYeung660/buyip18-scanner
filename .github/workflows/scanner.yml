@@ -66,6 +66,28 @@ jobs:
           done
           echo "出口: $(curl -s -m 8 -x http://127.0.0.1:7890 https://api.ipify.org)"
 
+      - name: Install checkout engine stack (cached)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb > /dev/null
+          pip install -q playwright
+          python -m playwright install-deps chromium > /dev/null 2>&1
+          Xvfb :99 -screen 0 1280x900x24 > /dev/null 2>&1 &
+          sleep 1
+
+      - name: Resolve Playwright version
+        id: pwv
+        run: echo "ver=$(pip show playwright | awk '/^Version/{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-chromium-${{ steps.pwv.outputs.ver }}
+
+      - name: Install chromium (cache-aware)
+        run: python -m playwright install chromium > /dev/null 2>&1
+
       - name: Run scanner loop
         env:
           SCAN_NODES_JSON: ${{ secrets.SCAN_NODES_JSON }}
@@ -73,6 +95,7 @@ jobs:
           MAX_MINUTES: ${{ inputs.max_minutes || '320' }}
           GH_PAT: ${{ secrets.CHECKOUT_PAT }}
           BARK_URL: ${{ secrets.BARK_URL }}
+          PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
         run: |
           python3 - <<'EOF'
           import json, os
@@ -86,4 +109,8 @@ jobs:
         if: always()
         with:
           name: scanner-log-${{ github.run_id }}
-          path: scanner.log
+          if-no-files-found: ignore
+          path: |
+            scanner.log
+            /tmp/checkout-engine/status/
+            /tmp/checkout-engine/engine-run.log

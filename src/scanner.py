@@ -177,6 +177,58 @@ def dispatch_checkout(sku, store):
         return r.status
 
 
+def local_checkout(sku, store, nodes):
+    """命中後免等新 runner：本 job 切 HK 家寬出口就地跑結帳引擎（省 runner 供給+環境安裝 ~90 秒）。
+    回傳 True=引擎已實際執行（不論成交與否，不再重複派工）；False=環境不備，交回派工路徑。"""
+    import shutil
+    import subprocess
+    pat = os.environ.get("GH_PAT", "").strip()
+    if not pat or not os.environ.get("PROFILES_JSON", "").strip():
+        log("本地結帳缺 GH_PAT/PROFILES_JSON secret — 走派工")
+        return False
+    hk = [n for n in nodes if "家宽" in n]  # 節點名為簡體「家宽」
+    if not hk:
+        log("節點池無家寬 — 走派工")
+        return False
+    node = random.choice(hk)
+    try:
+        mihomo_switch(node)
+        log("本地結帳出口 → " + mask(node))
+    except Exception as e:
+        log("切家寬失敗（%s）— 走派工" % str(e)[:50])
+        return False
+    if subprocess.run(["pgrep", "-f", "Xvfb :99"],
+                      capture_output=True).returncode != 0:
+        subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1280x900x24"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.5)
+    tmp = "/tmp/checkout-engine"
+    shutil.rmtree(tmp, ignore_errors=True)
+    r = subprocess.run(
+        ["git", "clone", "-q", "--depth", "1",
+         "https://x-access-token:%s@github.com/TommyYeung660/buyip18-checkout" % pat, tmp],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        log("clone checkout 失敗: " + (r.stderr or "")[-70:])
+        return False
+    env = dict(os.environ, SKU=sku, STORE=store, PROFILE="billy01",
+               DRY_RUN="", ADD_MODE="http", PROXY_PORT="7890",
+               DISPLAY=":99", RUN_URL="", VNC_URL="")
+    log("本地結帳引擎啟動（命中就地執行）")
+    try:
+        r = subprocess.run(["python3", "checkout.py"], cwd=tmp, env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, timeout=900)
+    except subprocess.TimeoutExpired as t:
+        log("本地結帳引擎逾時（15 分）— 視為已執行不重複派工")
+        return True
+    open(os.path.join(tmp, "engine-run.log"), "w").write(r.stdout or "")
+    for line in (r.stdout or "").strip().splitlines()[-12:]:
+        log("引擎| " + line)
+    log("本地結帳引擎結束 exit=%d" % r.returncode)
+    return True
+
+
 def bark(title, body):
     url = (os.environ.get("BARK_URL") or "").strip()
     if not url:
@@ -224,11 +276,17 @@ def main():
             log("★ 有貨！ %s → %s" % (sku, detail))
             bark("iPhone 18 有貨！",
                  "%s @ %s — 自動下單已觸發" % (sku, detail[:60]))
+            ran = False
             try:
-                dispatch_checkout(sku, store)
+                ran = local_checkout(sku, store, nodes)
             except Exception as e:
-                log("dispatch 失敗: %s" % e)
-                bark("dispatch 失敗", str(e)[:80])
+                log("本地結帳例外: %s" % str(e)[:80])
+            if not ran:
+                try:
+                    dispatch_checkout(sku, store)
+                except Exception as e:
+                    log("dispatch 失敗: %s" % e)
+                    bark("dispatch 失敗", str(e)[:80])
             return 0
         if sweep % 20 == 0:
             log("sweep %d | %0.1f 分 | 存活節點 %d | 無貨"
