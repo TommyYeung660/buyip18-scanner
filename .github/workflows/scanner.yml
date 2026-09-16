@@ -68,6 +68,7 @@ jobs:
 
       - name: Run scanner loop
         env:
+          SCAN_NODES_JSON: ${{ secrets.SCAN_NODES_JSON }}
           SCAN_NODES_FILE: /tmp/nodes.json
           MAX_MINUTES: ${{ inputs.max_minutes || '320' }}
           GH_PAT: ${{ secrets.CHECKOUT_PAT }}
