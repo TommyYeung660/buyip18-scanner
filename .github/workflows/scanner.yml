@@ -33,7 +33,7 @@ jobs:
 
       - name: Install mihomo
         run: |
-          MH_VER=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | python3 -c "import json,sys;print(json.load(sys.stdin)['tag_name'])")
+          MH_VER=v1.19.30
           curl -sL -o /tmp/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/${MH_VER}/mihomo-linux-amd64-v1-${MH_VER}.gz"
           gunzip -f /tmp/mihomo.gz && chmod +x /tmp/mihomo && sudo mv /tmp/mihomo /usr/local/bin/mihomo
 
