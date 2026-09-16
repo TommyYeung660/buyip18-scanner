@@ -195,7 +195,10 @@ def main():
             continue
         if hits:
             sku = sorted(hits)[0]
-            store = hits[sku][0][0]
+            # 結帳頁靠顯示名稱（Apple {店名}）點選，送店名；缺名時退回店號
+            store = hits[sku][0][1]
+            if not store:
+                store = hits[sku][0][0]
             detail = "; ".join("%s@%s(%s)" % (s, n, q)
                                for n, q in [(h[1], h[0], h[2])
                                             for h in hits[sku]][:3])
