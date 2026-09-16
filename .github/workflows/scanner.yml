@@ -79,6 +79,7 @@ jobs:
           nodes = json.loads(os.environ["SCAN_NODES_JSON"])
           json.dump(nodes, open("/tmp/nodes.json", "w"), ensure_ascii=False)
           EOF
+          set -o pipefail
           python3 src/scanner.py 2>&1 | tee scanner.log
 
       - uses: actions/upload-artifact@v4
