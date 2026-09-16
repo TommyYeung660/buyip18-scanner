@@ -38,6 +38,8 @@ jobs:
           gunzip -f /tmp/mihomo.gz && chmod +x /tmp/mihomo && sudo mv /tmp/mihomo /usr/local/bin/mihomo
 
       - name: Start mihomo (nodes from secret)
+        env:
+          SCAN_NODES_JSON: ${{ secrets.SCAN_NODES_JSON }}
         run: |
           python3 - <<'EOF'
           import json, os
