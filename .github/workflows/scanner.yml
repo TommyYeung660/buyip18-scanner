@@ -120,5 +120,7 @@ jobs:
           if-no-files-found: ignore
           path: |
             scanner.log
-            /tmp/checkout-engine/status/
             /tmp/checkout-engine/engine-run.log
+            /tmp/checkout-engine/status/latest.json
+          # 注意：public repo 的 artifact 人人可下載——絕不上傳引擎截圖（status/*.png
+          # 含帳單頁已填卡號+CVV，9/16 leak 審計同款洩漏路徑）
