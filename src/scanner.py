@@ -4,7 +4,7 @@
 iPhone 18 Pro Max 秒級庫存掃描器
 ================================
 單 job 內部循環（最長 ~5.5 小時），mihomo 載入訂閱節點並以 external-controller
-秒切出口；每節點 ≥15 秒一次請求（禮貌頻率），N 節點聚合 ≈ 每 1-2 秒一次掃描。
+秒切出口；每節點每輪 3 請求（連續），節點間距 ≥15 秒（禮貌頻率），N 節點聚合 ≈ 每 1-2 秒一次掃描。
 見貨 → dispatch buyip18-checkout（帶 SKU+店精準打擊 payload）+ Bark → job 結束。
 
 環境：SCAN_NODES_FILE（mihomo proxies 陣列 JSON）、GH_PAT、BARK_URL（可選）、
@@ -23,6 +23,8 @@ PARTS = ["MJXQ4ZA/A", "MJXR4ZA/A", "MJXV4ZA/A", "MJXW4ZA/A",
          "MJY04ZA/A", "MJY14ZA/A", "MJY44ZA/A", "MJY54ZA/A"]
 MAX_PARTS = 3                       # pickup-message 上限，>3 會 541
 PER_NODE_GAP_S = 15                 # 每節點兩次請求的最小間距（共享出口禮貌）
+NODE_COOLDOWN_S = 900               # 節點單次失敗的冷卻秒數（15 分）
+NODE_MAX_STRIKES = 3                # 累計失敗達此數 → 三振出局（該 job 內不再使用）
 SWEEP_PAUSE = (2.0, 4.0)            # 每輪掃描間的基礎停頓
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "320"))
 MIHOMO_API = "http://127.0.0.1:9090"
@@ -30,7 +32,8 @@ PROXY = "http://127.0.0.1:7890"
 
 START = time.time()
 node_last_used = {}
-node_dead = set()
+node_dead = {}                      # name → 冷卻截止 unix-ts（過期即復活）
+node_strikes = {}                   # name → 累計失敗次數（三振出局）
 
 
 def mask(name):
@@ -104,9 +107,11 @@ def poll_sweep():
 
 
 def pick_node(nodes):
-    """選最久未用且存活的節點；保證每節點 ≥PER_NODE_GAP_S。"""
+    """選最久未用且存活的節點（跳過冷卻中／三振出局者）；保證每節點 ≥PER_NODE_GAP_S。"""
     while True:
-        alive = [n for n in nodes if n not in node_dead]
+        alive = [n for n in nodes
+                 if node_dead.get(n, 0) <= time.time()
+                 and node_strikes.get(n, 0) < NODE_MAX_STRIKES]
         if not alive:
             raise RuntimeError("全部節點失效")
         candidate = min(alive, key=lambda n: node_last_used.get(n, 0))
@@ -124,16 +129,29 @@ def sweep_once(nodes):
     for _ in range(3):
         node = pick_node(nodes)
         if _cur_node != node:
-            mihomo_switch(node)
-            _cur_node = node
-            log("切換出口 → " + mask(node))
+            try:
+                mihomo_switch(node)
+                _cur_node = node
+                log("切換出口 → " + mask(node))
+            except Exception as e:
+                log("mihomo 切換失敗（%s…）: %s" % (mask(node), str(e)[:60]))
+                # 記失敗但不標死節點（mihomo 本身問題，非出口問題）
+                node_strikes[node] = node_strikes.get(node, 0)  # 不加擊
+                time.sleep(2)
+                continue
         try:
             hits = poll_sweep()
             if hits:
                 return hits
         except Exception as e:
             log("節點失效（%s…）: %s" % (mask(node), str(e)[:60]))
-            node_dead.add(node)
+            node_strikes[node] = node_strikes.get(node, 0) + 1
+            if node_strikes[node] >= NODE_MAX_STRIKES:
+                node_dead[node] = time.time() + 86400  # 該 job 內不再使用
+                log("節點三振出局（%s…）" % mask(node))
+            else:
+                node_dead[node] = time.time() + NODE_COOLDOWN_S
+                log("節點冷卻 15 分（%s…，第 %d 敗）" % (mask(node), node_strikes[node]))
     return hits
 
 
@@ -190,11 +208,12 @@ def main():
             hits = sweep_once(nodes)
         except RuntimeError as e:
             log("全部節點失效，10 分鐘後重試: %s" % e)
-            node_dead.clear()
+            node_dead.clear()  # 清冷卻讓節點復活（三振次數保留）
             time.sleep(600)
             continue
         if hits:
-            sku = sorted(hits)[0]
+            # SKU 優先序照 PARTS 定義（候選偏好），非字母序
+            sku = next((p for p in PARTS if p in hits), sorted(hits)[0])
             # 結帳頁靠顯示名稱（Apple {店名}）點選，送店名；缺名時退回店號
             store = hits[sku][0][1]
             if not store:
@@ -213,7 +232,10 @@ def main():
             return 0
         if sweep % 20 == 0:
             log("sweep %d | %0.1f 分 | 存活節點 %d | 無貨"
-                % (sweep, now_min(), len(nodes) - len(node_dead)))
+                % (sweep, now_min(),
+                   len([n for n in nodes
+                        if node_dead.get(n, 0) <= time.time()
+                        and node_strikes.get(n, 0) < NODE_MAX_STRIKES])))
         time.sleep(random.uniform(*SWEEP_PAUSE))
     log("到時收工，等 watchdog 重啟")
     return 0
