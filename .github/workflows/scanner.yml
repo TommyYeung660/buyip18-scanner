@@ -1,0 +1,85 @@
+name: High-speed scanner (node rotation, in-job loop)
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # watchdog：掃描器不在就重啟
+  workflow_dispatch:
+    inputs:
+      max_minutes:
+        description: "本輪掃描時長（分鐘）"
+        default: "320"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip if already scanning
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          N=$(gh run list -R ${{ github.repository }} --workflow scanner.yml \
+              --status in_progress --json databaseId --jq 'length')
+          echo "in_progress=$N"
+          if [ "$N" -gt 1 ]; then echo "已有掃描器運行 — 跳過"; exit 42; fi
+
+      - name: Install mihomo
+        run: |
+          MH_VER=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | python3 -c "import json,sys;print(json.load(sys.stdin)['tag_name'])")
+          curl -sL -o /tmp/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/${MH_VER}/mihomo-linux-amd64-v1-${MH_VER}.gz"
+          gunzip -f /tmp/mihomo.gz && chmod +x /tmp/mihomo && sudo mv /tmp/mihomo /usr/local/bin/mihomo
+
+      - name: Start mihomo (nodes from secret)
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          nodes = json.loads(os.environ["SCAN_NODES_JSON"])
+          cfg = {
+            "mixed-port": 7890,
+            "external-controller": "127.0.0.1:9090",
+            "mode": "rule",
+            "log-level": "warning",
+            "dns": {"enable": True, "nameserver": ["8.8.8.8", "1.1.1.1"]},
+            "proxies": nodes,
+            "proxy-groups": [{"name": "SCAN", "type": "select",
+                              "proxies": [n["name"] for n in nodes]}],
+            "rules": ["MATCH,SCAN"],
+          }
+          os.makedirs("/tmp/mihomo-data", exist_ok=True)
+          json.dump(cfg, open("/tmp/scanner-mihomo.yaml", "w"), ensure_ascii=False)
+          print("節點:", len(nodes))
+          EOF
+          nohup mihomo -f /tmp/scanner-mihomo.yaml -d /tmp/mihomo-data > /tmp/mihomo.log 2>&1 &
+          for i in $(seq 1 15); do
+            curl -s -m 3 -x http://127.0.0.1:7890 https://api.ipify.org && break
+            sleep 2
+          done
+          echo "出口: $(curl -s -m 8 -x http://127.0.0.1:7890 https://api.ipify.org)"
+
+      - name: Run scanner loop
+        env:
+          SCAN_NODES_FILE: /tmp/nodes.json
+          MAX_MINUTES: ${{ inputs.max_minutes || '320' }}
+          GH_PAT: ${{ secrets.CHECKOUT_PAT }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          nodes = json.loads(os.environ["SCAN_NODES_JSON"])
+          json.dump(nodes, open("/tmp/nodes.json", "w"), ensure_ascii=False)
+          EOF
+          python3 src/scanner.py 2>&1 | tee scanner.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scanner-log-${{ github.run_id }}
+          path: scanner.log
