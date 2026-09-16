@@ -219,8 +219,8 @@ def main():
             if not store:
                 store = hits[sku][0][0]
             detail = "; ".join("%s@%s(%s)" % (s, n, q)
-                               for n, q in [(h[1], h[0], h[2])
-                                            for h in hits[sku]][:3])
+                               for s, n, q in [(h[1], h[0], h[2])
+                                               for h in hits[sku]][:3])
             log("★ 有貨！ %s → %s" % (sku, detail))
             bark("iPhone 18 有貨！",
                  "%s @ %s — 自動下單已觸發" % (sku, detail[:60]))
