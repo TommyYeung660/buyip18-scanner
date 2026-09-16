@@ -79,8 +79,9 @@ jobs:
         id: pwv
         run: echo "ver=$(pip show playwright | awk '/^Version/{print $2}')" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Playwright chromium
-        uses: actions/cache@v4
+      - name: Cache Playwright chromium (restore)
+        id: pwc
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ms-playwright
           key: pw-chromium-${{ steps.pwv.outputs.ver }}
@@ -104,6 +105,13 @@ jobs:
           EOF
           set -o pipefail
           python3 src/scanner.py 2>&1 | tee scanner.log
+
+      - name: Cache Playwright chromium (save)
+        if: always() && steps.pwc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-chromium-${{ steps.pwv.outputs.ver }}
 
       - uses: actions/upload-artifact@v4
         if: always()
