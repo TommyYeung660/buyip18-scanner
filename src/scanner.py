@@ -173,6 +173,11 @@ def bark(title, body):
 def main():
     nodes_file = os.environ.get("SCAN_NODES_FILE", "/tmp/nodes.json")
     nodes = [n["name"] for n in json.load(open(nodes_file))]
+    # 預先剔除已知壞節點（信息節點/V6 壞線）
+    bad_kw = ["建议", "建議", "V6【", "剩餘", "剩余", "过期", "過期", "官網", "群組"]
+    dropped = [n for n in nodes if any(k in n for k in bad_kw)]
+    nodes = [n for n in nodes if not any(k in n for k in bad_kw)]
+    log("剔除壞節點 %d 個，可用 %d 個" % (len(dropped), len(nodes)))
     log("掃描器啟動：節點 %d 個，最長 %d 分鐘" % (len(nodes), MAX_MINUTES))
     sweep = 0
     while now_min() < MAX_MINUTES:
