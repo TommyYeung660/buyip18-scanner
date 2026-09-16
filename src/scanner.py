@@ -33,6 +33,10 @@ node_last_used = {}
 node_dead = set()
 
 
+def mask(name):
+    return (name[:10] + "…") if len(name) > 10 else name
+
+
 def log(msg):
     print(time.strftime("%H:%M:%S") + "  " + msg, flush=True)
 
@@ -122,13 +126,13 @@ def sweep_once(nodes):
         if _cur_node != node:
             mihomo_switch(node)
             _cur_node = node
-            log("切換出口 → " + node[:36])
+            log("切換出口 → " + mask(node))
         try:
             hits = poll_sweep()
             if hits:
                 return hits
         except Exception as e:
-            log("節點失效（%s）: %s" % (node[:36], str(e)[:80]))
+            log("節點失效（%s…）: %s" % (mask(node), str(e)[:60]))
             node_dead.add(node)
     return hits
 
