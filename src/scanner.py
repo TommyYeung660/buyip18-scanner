@@ -292,18 +292,41 @@ def local_checkout(sku, store, nodes):
     return True
 
 
-def bark(title, body):
-    url = (os.environ.get("BARK_URL") or "").strip()
-    if not url:
+def pushover(title, body, priority=0):
+    """Pushover（Android 主通道）。priority>=2=緊急：每 30 秒重響最長 3 小時直至確認。"""
+    token = (os.environ.get("PUSHOVER_TOKEN") or "").strip()
+    user = (os.environ.get("PUSHOVER_USER") or "").strip()
+    if not token or not user:
         return
+    d = {"token": token, "user": user, "title": title[:250],
+         "message": body[:1000], "priority": str(priority),
+         "sound": "siren" if priority >= 2 else "bugle"}
+    if priority >= 2:
+        d["retry"] = "30"
+        d["expire"] = "10800"
     try:
-        t = urllib.parse.quote(title)
-        b = urllib.parse.quote(body)
-        http(url.rstrip("/") + "/%s/%s?group=iPhone18&level=timeSensitive"
-             "&sound=alarm" % (t, b), timeout=10, proxy=False)
-        log("Bark 已送出")
+        req = urllib.request.Request(
+            "https://api.pushover.net/1/messages.json",
+            data=urllib.parse.urlencode(d).encode())
+        with urllib.request.urlopen(req, timeout=10) as r:
+            log("Pushover 已送出 http=%d" % r.status)
     except Exception as e:
-        log("Bark 失敗: " + str(e)[:80])
+        log("Pushover 失敗: " + str(e)[:80])
+
+
+def bark(title, body, priority=0):
+    """通知分發：Bark（iOS，未設跳過）+ Pushover（未設跳過），兩通道並行。"""
+    url = (os.environ.get("BARK_URL") or "").strip()
+    if url:
+        try:
+            t = urllib.parse.quote(title)
+            b = urllib.parse.quote(body)
+            http(url.rstrip("/") + "/%s/%s?group=iPhone18&level=timeSensitive"
+                 "&sound=alarm" % (t, b), timeout=10, proxy=False)
+            log("Bark 已送出")
+        except Exception as e:
+            log("Bark 失敗: " + str(e)[:80])
+    pushover(title, body, priority)
 
 
 # ---------------------------------------------------------------- 主循環
@@ -339,7 +362,7 @@ def main():
                                                for h in hits[sku]][:3])
             log("★ 有貨！ %s → %s" % (sku, detail))
             bark("iPhone 18 有貨！",
-                 "%s @ %s — 自動下單已觸發" % (sku, detail[:60]))
+                 "%s @ %s — 自動下單已觸發" % (sku, detail[:60]), priority=2)
             # 優先序：keeper 駐場會話（秒級）→ 本地結帳（~60-90s）→ 派工（~3 分）
             if keeper_on:
                 st = keeper_state()
@@ -357,7 +380,7 @@ def main():
                     log("keeper 結果: %s" % json.dumps(res, ensure_ascii=False)[:140])
                     bark("iPhone 18 下單結果",
                          "%s %s" % (res.get("state", "?"),
-                                    str(res.get("result", ""))[:60]))
+                                    str(res.get("result", ""))[:60]), priority=1)
                     return 0
                 if st:
                     log("keeper 狀態=%s 不可用 — 走後備" % st.get("state"))
@@ -371,7 +394,7 @@ def main():
                     dispatch_checkout(sku, store)
                 except Exception as e:
                     log("dispatch 失敗: %s" % e)
-                    bark("dispatch 失敗", str(e)[:80])
+                    bark("dispatch 失敗", str(e)[:80], priority=1)
             return 0
         if sweep % 20 == 0:
             log("sweep %d | %0.1f 分 | 存活節點 %d | 無貨 | keeper=%s"

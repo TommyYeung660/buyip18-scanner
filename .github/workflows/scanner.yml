@@ -105,6 +105,8 @@ jobs:
           MAX_MINUTES: ${{ inputs.max_minutes || '320' }}
           GH_PAT: ${{ secrets.CHECKOUT_PAT }}
           BARK_URL: ${{ secrets.BARK_URL }}
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
           PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
         run: |
           python3 - <<'EOF'
