@@ -208,7 +208,7 @@ def keeper_wait(timeout_s):
         last = keeper_state()
         if last and last.get("state") not in ("ready", "buying", "selected"):
             return last
-        time.sleep(3)
+        time.sleep(0.3)  # 命令拾取與結果回傳都快（原 3s）
     return last or {"state": "timeout"}
 
 
