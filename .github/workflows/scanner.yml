@@ -44,20 +44,29 @@ jobs:
           python3 - <<'EOF'
           import json, os
           nodes = json.loads(os.environ["SCAN_NODES_JSON"])
+          # BUY 出口組只准香港家寬（結帳必須 HK IP；「家宽」關鍵字會誤中韓台日美家寬）
+          hk_buy = [n["name"] for n in nodes
+                    if "家宽" in n["name"] and "香港" in n["name"]]
           cfg = {
             "mixed-port": 7890,
             "external-controller": "127.0.0.1:9090",
             "mode": "rule",
             "log-level": "warning",
             "dns": {"enable": True, "nameserver": ["8.8.8.8", "1.1.1.1"]},
+            "listeners": [{"name": "buy", "type": "mixed", "port": 7891,
+                           "listen": "127.0.0.1", "proxy": "BUY"}],
             "proxies": nodes,
-            "proxy-groups": [{"name": "SCAN", "type": "select",
-                              "proxies": [n["name"] for n in nodes]}],
+            "proxy-groups": [
+              {"name": "SCAN", "type": "select",
+               "proxies": [n["name"] for n in nodes]},
+              {"name": "BUY", "type": "select",
+               "proxies": hk_buy or [nodes[0]["name"]]},
+            ],
             "rules": ["MATCH,SCAN"],
           }
           os.makedirs("/tmp/mihomo-data", exist_ok=True)
           json.dump(cfg, open("/tmp/scanner-mihomo.yaml", "w"), ensure_ascii=False)
-          print("節點:", len(nodes))
+          print("節點:", len(nodes), "| BUY 出口:", hk_buy or "（無家寬，退全部）")
           EOF
           nohup mihomo -f /tmp/scanner-mihomo.yaml -d /tmp/mihomo-data > /tmp/mihomo.log 2>&1 &
           for i in $(seq 1 15); do
@@ -120,7 +129,8 @@ jobs:
           if-no-files-found: ignore
           path: |
             scanner.log
-            /tmp/checkout-engine/engine-run.log
-            /tmp/checkout-engine/status/latest.json
+            /tmp/checkout-fallback/engine-run.log
+            /tmp/checkout-fallback/status/latest.json
+            /tmp/keeper/keeper.log
           # 注意：public repo 的 artifact 人人可下載——絕不上傳引擎截圖（status/*.png
           # 含帳單頁已填卡號+CVV，9/16 leak 審計同款洩漏路徑）

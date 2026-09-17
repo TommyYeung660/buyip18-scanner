@@ -177,8 +177,82 @@ def dispatch_checkout(sku, store):
         return r.status
 
 
+# ---------------------------------------------------------------- 駐場結帳（KEEPER）
+# 掃描 job 常駐一個「預熱結帳會話」：袋已填、訪客已過、停在履約頁待命。
+# 命中且 SKU 吻合 → 掃描器經命令檔叫 keeper 就地選店下單（免預熱/入袋/訪客 ~45 秒）。
+KEEPER_STATE = "/tmp/keeper/state.json"
+KEEPER_CMD = "/tmp/keeper/command.json"
+KEEPER_ENGINE_DIR = "/tmp/checkout-engine"      # keeper 常駐引擎
+FALLBACK_ENGINE_DIR = "/tmp/checkout-fallback"  # 命中重走的後備引擎（勿與 keeper 共用目錄）
+
+
+def keeper_state():
+    try:
+        return json.load(open(KEEPER_STATE))
+    except Exception:
+        return None
+
+
+def keeper_fire(sku, store):
+    os.makedirs(os.path.dirname(KEEPER_CMD), exist_ok=True)
+    json.dump({"action": "buy", "sku": sku, "store": store},
+              open(KEEPER_CMD, "w"), ensure_ascii=False)
+    log("keeper 命令已下（%s @ %s）— 等待結果" % (sku, store))
+
+
+def keeper_wait(timeout_s):
+    """輪詢 keeper state 直到終態（ordered/declined/dry-run/keeper-*/error）或逾時。"""
+    t0 = time.time()
+    last = None
+    while time.time() - t0 < timeout_s:
+        last = keeper_state()
+        if last and last.get("state") not in ("ready", "buying", "selected"):
+            return last
+        time.sleep(3)
+    return last or {"state": "timeout"}
+
+
+def keeper_start(nodes):
+    """啟動駐場引擎：clone checkout repo → KEEPER 模式跑 checkout.py（背景、家寬出口 7891）。"""
+    import shutil
+    import subprocess
+    pat = os.environ.get("GH_PAT", "").strip()
+    if not pat or not os.environ.get("PROFILES_JSON", "").strip():
+        log("keeper 未啟用（缺 GH_PAT/PROFILES_JSON secret）")
+        return False
+    if not [n for n in nodes if "家宽" in n and "香港" in n]:
+        log("keeper 未啟用（節點池無香港家寬）")
+        return False
+    shutil.rmtree(KEEPER_ENGINE_DIR, ignore_errors=True)
+    r = subprocess.run(
+        ["git", "clone", "-q", "--depth", "1",
+         "https://x-access-token:%s@github.com/TommyYeung660/buyip18-checkout" % pat,
+         KEEPER_ENGINE_DIR],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        log("keeper clone 失敗: " + (r.stderr or "")[-70:])
+        return False
+    os.makedirs("/tmp/keeper", exist_ok=True)
+    for f in (KEEPER_STATE, KEEPER_CMD):
+        try:
+            os.remove(f)
+        except Exception:
+            pass
+    keeper_skus = ",".join(PARTS[:2])  # 袋內 = 候選偏好前兩個（hint 排最前+次選）
+    env = dict(os.environ, SKU=PARTS[0], KEEPER="1", KEEPER_SKUS=keeper_skus,
+               KEEPER_STATE=KEEPER_STATE, KEEPER_CMD=KEEPER_CMD,
+               PROFILE="billy01", DRY_RUN="", ADD_MODE="http",
+               PROXY_PORT="7891", DISPLAY=":99", RUN_URL="", VNC_URL="")
+    proc = subprocess.Popen(
+        ["python3", "checkout.py"], cwd=KEEPER_ENGINE_DIR, env=env,
+        stdout=open("/tmp/keeper/keeper.log", "w"), stderr=subprocess.STDOUT)
+    log("keeper 已啟動（pid %d）— 預熱結帳會話待命（袋內候選 %s）"
+        % (proc.pid, keeper_skus))
+    return True
+
+
 def local_checkout(sku, store, nodes):
-    """命中後免等新 runner：本 job 切 HK 家寬出口就地跑結帳引擎（省 runner 供給+環境安裝 ~90 秒）。
+    """命中後免等新 runner：本 job 就地跑結帳引擎（家寬出口 7891，mihomo BUY 組釘死）。
     回傳 True=引擎已實際執行（不論成交與否，不再重複派工）；False=環境不備，交回派工路徑。"""
     import shutil
     import subprocess
@@ -186,23 +260,12 @@ def local_checkout(sku, store, nodes):
     if not pat or not os.environ.get("PROFILES_JSON", "").strip():
         log("本地結帳缺 GH_PAT/PROFILES_JSON secret — 走派工")
         return False
-    hk = [n for n in nodes if "家宽" in n]  # 節點名為簡體「家宽」
-    if not hk:
-        log("節點池無家寬 — 走派工")
-        return False
-    node = random.choice(hk)
-    try:
-        mihomo_switch(node)
-        log("本地結帳出口 → " + mask(node))
-    except Exception as e:
-        log("切家寬失敗（%s）— 走派工" % str(e)[:50])
-        return False
     if subprocess.run(["pgrep", "-f", "Xvfb :99"],
                       capture_output=True).returncode != 0:
         subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1280x900x24"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)
-    tmp = "/tmp/checkout-engine"
+    tmp = FALLBACK_ENGINE_DIR
     shutil.rmtree(tmp, ignore_errors=True)
     r = subprocess.run(
         ["git", "clone", "-q", "--depth", "1",
@@ -212,9 +275,9 @@ def local_checkout(sku, store, nodes):
         log("clone checkout 失敗: " + (r.stderr or "")[-70:])
         return False
     env = dict(os.environ, SKU=sku, STORE=store, PROFILE="billy01",
-               DRY_RUN="", ADD_MODE="http", PROXY_PORT="7890",
+               DRY_RUN="", ADD_MODE="http", PROXY_PORT="7891",
                DISPLAY=":99", RUN_URL="", VNC_URL="")
-    log("本地結帳引擎啟動（命中就地執行）")
+    log("本地結帳引擎啟動（命中就地執行，家寬出口 7891）")
     try:
         r = subprocess.run(["python3", "checkout.py"], cwd=tmp, env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -253,6 +316,7 @@ def main():
     nodes = [n for n in nodes if not any(k in n for k in bad_kw)]
     log("剔除壞節點 %d 個，可用 %d 個" % (len(dropped), len(nodes)))
     log("掃描器啟動：節點 %d 個，最長 %d 分鐘" % (len(nodes), MAX_MINUTES))
+    keeper_on = keeper_start(nodes)
     sweep = 0
     while now_min() < MAX_MINUTES:
         sweep += 1
@@ -276,6 +340,27 @@ def main():
             log("★ 有貨！ %s → %s" % (sku, detail))
             bark("iPhone 18 有貨！",
                  "%s @ %s — 自動下單已觸發" % (sku, detail[:60]))
+            # 優先序：keeper 駐場會話（秒級）→ 本地結帳（~60-90s）→ 派工（~3 分）
+            if keeper_on:
+                st = keeper_state()
+                if not st:
+                    log("keeper 預熱中 — 等待就緒（最長 100 秒）")
+                    t0 = time.time()
+                    while time.time() - t0 < 100:
+                        st = keeper_state()
+                        if st:
+                            break
+                        time.sleep(2)
+                if st and st.get("state") == "ready":
+                    keeper_fire(sku, store)
+                    res = keeper_wait(300)
+                    log("keeper 結果: %s" % json.dumps(res, ensure_ascii=False)[:140])
+                    bark("iPhone 18 下單結果",
+                         "%s %s" % (res.get("state", "?"),
+                                    str(res.get("result", ""))[:60]))
+                    return 0
+                if st:
+                    log("keeper 狀態=%s 不可用 — 走後備" % st.get("state"))
             ran = False
             try:
                 ran = local_checkout(sku, store, nodes)
@@ -289,11 +374,12 @@ def main():
                     bark("dispatch 失敗", str(e)[:80])
             return 0
         if sweep % 20 == 0:
-            log("sweep %d | %0.1f 分 | 存活節點 %d | 無貨"
+            log("sweep %d | %0.1f 分 | 存活節點 %d | 無貨 | keeper=%s"
                 % (sweep, now_min(),
                    len([n for n in nodes
                         if node_dead.get(n, 0) <= time.time()
-                        and node_strikes.get(n, 0) < NODE_MAX_STRIKES])))
+                        and node_strikes.get(n, 0) < NODE_MAX_STRIKES]),
+                   (keeper_state() or {}).get("state", "-")))
         time.sleep(random.uniform(*SWEEP_PAUSE))
     log("到時收工，等 watchdog 重啟")
     return 0
