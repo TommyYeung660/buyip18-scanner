@@ -193,20 +193,24 @@ def keeper_state():
         return None
 
 
-def keeper_fire(sku, store):
+def keeper_fire(sku, store, store_code=""):
     os.makedirs(os.path.dirname(KEEPER_CMD), exist_ok=True)
-    json.dump({"action": "buy", "sku": sku, "store": store},
+    json.dump({"action": "buy", "sku": sku, "store": store,
+               "store_code": store_code},
               open(KEEPER_CMD, "w"), ensure_ascii=False)
-    log("keeper 命令已下（%s @ %s）— 等待結果" % (sku, store))
+    log("keeper 命令已下（%s @ %s/%s）— 等待結果" % (sku, store, store_code or "?"))
 
 
 def keeper_wait(timeout_s):
-    """輪詢 keeper state 直到終態（ordered/declined/dry-run/keeper-*/error）或逾時。"""
+    """輪詢 keeper state 直到真終態或逾時。
+    keeper-swapping 是長流程（外部 d11bb25：換袋→重走→下單），提前當終態返回
+    會令掃描器收工殺掉 keeper=換袋腰斬（9/18 晨 3 次命中的實測教訓）。"""
     t0 = time.time()
     last = None
     while time.time() - t0 < timeout_s:
         last = keeper_state()
-        if last and last.get("state") not in ("ready", "buying", "selected"):
+        if last and last.get("state") not in (
+                "ready", "buying", "selected", "keeper-swapping"):
             return last
         time.sleep(0.3)  # 命令拾取與結果回傳都快（原 3s）
     return last or {"state": "timeout"}
@@ -357,6 +361,7 @@ def main():
             store = hits[sku][0][1]
             if not store:
                 store = hits[sku][0][0]
+            store_code = hits[sku][0][0]  # R###（方案 B HTTP selectStore 用）
             detail = "; ".join("%s@%s(%s)" % (s, n, q)
                                for s, n, q in [(h[1], h[0], h[2])
                                                for h in hits[sku]][:3])
@@ -375,13 +380,17 @@ def main():
                             break
                         time.sleep(2)
                 if st and st.get("state") == "ready":
-                    keeper_fire(sku, store)
-                    res = keeper_wait(300)
+                    keeper_fire(sku, store, store_code)
+                    res = keeper_wait(600)
                     log("keeper 結果: %s" % json.dumps(res, ensure_ascii=False)[:140])
                     bark("iPhone 18 下單結果",
                          "%s %s" % (res.get("state", "?"),
                                     str(res.get("result", ""))[:60]), priority=1)
-                    return 0
+                    # 只在 keeper 真跑出結帳結果才收工；keeper 失敗（no-pickup/
+                    # mismatch/dead/逾時）落到後備鏈（9/18 晨發現的設計缺陷修正）
+                    if res and res.get("state") in ("ordered", "declined", "dry-run"):
+                        return 0
+                    log("keeper 未成（%s）— 落後備鏈" % res.get("state", "?"))
                 if st:
                     log("keeper 狀態=%s 不可用 — 走後備" % st.get("state"))
             ran = False
