@@ -45,9 +45,17 @@ jobs:
           python3 - <<'EOF'
           import json, os
           nodes = json.loads(os.environ["SCAN_NODES_JSON"])
-          # BUY 出口組只准香港家寬（結帳必須 HK IP；「家宽」關鍵字會誤中韓台日美家寬）
-          hk_buy = [n["name"] for n in nodes
-                    if "家宽" in n["name"] and "香港" in n["name"]]
+          # BUY 出口組只准香港節點（結帳必須 HK IP；「家宽」關鍵字會誤中韓台日美家寬）。
+          # 家寬永遠優先（生產實證乾淨），其餘按出口品質排序墊後：
+          # 直连/原生 → IPLC → 專線（9/17 生產 541 實證，只當最後手段）。
+          # 健康檢查走商店端點：success.html 探不到 Akamai 541 風控擋頁
+          def _buy_rank(name):
+              if "家宽" in name: return 0
+              if "直连" in name or "原生" in name: return 1
+              if "IPLC" in name: return 2
+              return 3
+          hk_buy = sorted([n["name"] for n in nodes
+                           if "香港" in n["name"]], key=_buy_rank)
           cfg = {
             "mixed-port": 7890,
             "external-controller": "127.0.0.1:9090",
@@ -62,8 +70,8 @@ jobs:
                "proxies": [n["name"] for n in nodes]},
               {"name": "BUY", "type": "fallback",
                "proxies": hk_buy or [nodes[0]["name"]],
-               "url": "https://www.apple.com/library/test/success.html",
-               "interval": 60},
+               "url": "https://www.apple.com/hk-zh/shop/retail/pickup-message?pl=true&fae=true&mts.0=regular&parts.0=MJXQ4ZA/A&location=Hong%20Kong",
+               "interval": 60, "expected-status": "200"},
             ],
             "rules": ["MATCH,SCAN"],
           }
