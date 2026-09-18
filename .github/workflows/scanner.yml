@@ -71,7 +71,7 @@ jobs:
               {"name": "BUY", "type": "fallback",
                "proxies": hk_buy or [nodes[0]["name"]],
                "url": "https://www.apple.com/hk-zh/shop/retail/pickup-message?pl=true&fae=true&mts.0=regular&parts.0=MJXQ4ZA/A&location=Hong%20Kong",
-               "interval": 60, "expected-status": "200"},
+               "interval": 60, "expected-status": "200", "lazy": False},
             ],
             "rules": ["MATCH,SCAN"],
           }
