@@ -184,6 +184,7 @@ def dispatch_checkout(sku, store):
 KEEPER_STATE = "/tmp/keeper/state.json"
 KEEPER_CMD = "/tmp/keeper/command.json"
 KEEPER_ENGINE_DIR = "/tmp/checkout-engine"      # keeper 常駐引擎
+KEEPER_PROC = None                              # keeper 進程柄（死後即時重開）
 FALLBACK_ENGINE_DIR = "/tmp/checkout-fallback"  # 命中重走的後備引擎（勿與 keeper 共用目錄）
 
 
@@ -250,9 +251,11 @@ def keeper_start(nodes):
                PROXY_PORT="7891", DISPLAY=":99", RUN_URL="",
                VNC_URL=os.environ.get("VNC_URL", ""),
                VNC_PW=os.environ.get("VNC_PW", ""))
+    global KEEPER_PROC
     proc = subprocess.Popen(
         ["python3", "checkout.py"], cwd=KEEPER_ENGINE_DIR, env=env,
         stdout=open("/tmp/keeper/keeper.log", "w"), stderr=subprocess.STDOUT)
+    KEEPER_PROC = proc
     log("keeper 已啟動（pid %d）— 預熱結帳會話待命（袋內候選 %s）"
         % (proc.pid, keeper_skus))
     return True
@@ -349,9 +352,17 @@ def main():
     log("剔除壞節點 %d 個，可用 %d 個" % (len(dropped), len(nodes)))
     log("掃描器啟動：節點 %d 個，最長 %d 分鐘" % (len(nodes), MAX_MINUTES))
     keeper_on = keeper_start(nodes)
+    last_kstart = time.time()
     sweep = 0
     while now_min() < MAX_MINUTES:
         sweep += 1
+        # keeper 進程退出（判死自曝/讓位/崩潰）→ 冷卻 120s 即時重開，盲窗壓最短
+        if (keeper_on and KEEPER_PROC is not None
+                and KEEPER_PROC.poll() is not None
+                and time.time() - last_kstart > 120):
+            last_kstart = time.time()
+            log("keeper 進程已退（exit=%s）— 即時重開" % KEEPER_PROC.returncode)
+            keeper_on = keeper_start(nodes)
         try:
             hits = sweep_once(nodes)
         except RuntimeError as e:
@@ -395,6 +406,12 @@ def main():
                     # mismatch/dead/逾時）落到後備鏈（9/18 晨發現的設計缺陷修正）
                     if res and res.get("state") in ("ordered", "declined", "dry-run"):
                         return 0
+                    if res and res.get("state") == "no-pickup":
+                        # 全店無額已被 keeper HTTP 證實——8 分鐘後備引擎只會重演，
+                        # 就地重開 keeper 續掃（盲窗 ~90 秒 vs 後備 8 分）
+                        log("keeper no-pickup（全店無額）— 免後備，就地重開續掃")
+                        keeper_on = keeper_start(nodes)
+                        continue
                     log("keeper 未成（%s）— 落後備鏈" % res.get("state", "?"))
                 if st:
                     log("keeper 狀態=%s 不可用 — 走後備" % st.get("state"))

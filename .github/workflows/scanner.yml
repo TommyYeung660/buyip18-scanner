@@ -60,8 +60,10 @@ jobs:
             "proxy-groups": [
               {"name": "SCAN", "type": "select",
                "proxies": [n["name"] for n in nodes]},
-              {"name": "BUY", "type": "select",
-               "proxies": hk_buy or [nodes[0]["name"]]},
+              {"name": "BUY", "type": "fallback",
+               "proxies": hk_buy or [nodes[0]["name"]],
+               "url": "https://www.apple.com/library/test/success.html",
+               "interval": 60},
             ],
             "rules": ["MATCH,SCAN"],
           }
