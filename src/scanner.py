@@ -14,6 +14,7 @@ import json
 import os
 import random
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -246,7 +247,9 @@ def keeper_start(nodes):
     env = dict(os.environ, SKU=PARTS[0], KEEPER="1", KEEPER_SKUS=keeper_skus,
                KEEPER_STATE=KEEPER_STATE, KEEPER_CMD=KEEPER_CMD,
                PROFILE="billy01", DRY_RUN="", ADD_MODE="http",
-               PROXY_PORT="7891", DISPLAY=":99", RUN_URL="", VNC_URL="")
+               PROXY_PORT="7891", DISPLAY=":99", RUN_URL="",
+               VNC_URL=os.environ.get("VNC_URL", ""),
+               VNC_PW=os.environ.get("VNC_PW", ""))
     proc = subprocess.Popen(
         ["python3", "checkout.py"], cwd=KEEPER_ENGINE_DIR, env=env,
         stdout=open("/tmp/keeper/keeper.log", "w"), stderr=subprocess.STDOUT)
@@ -280,7 +283,9 @@ def local_checkout(sku, store, nodes):
         return False
     env = dict(os.environ, SKU=sku, STORE=store, PROFILE="billy01",
                DRY_RUN="", ADD_MODE="http", PROXY_PORT="7891",
-               DISPLAY=":99", RUN_URL="", VNC_URL="")
+               DISPLAY=":99", RUN_URL="",
+               VNC_URL=os.environ.get("VNC_URL", ""),
+               VNC_PW=os.environ.get("VNC_PW", ""))
     log("本地結帳引擎啟動（命中就地執行，家寬出口 7891）")
     try:
         r = subprocess.run(["python3", "checkout.py"], cwd=tmp, env=env,
@@ -417,5 +422,58 @@ def main():
     return 0
 
 
+def status_pusher():
+    """引擎 status/latest.json（keeper+本地後備取較新者）即時推送 checkout repo（private）。
+    掃描 job 沒有 git commit 步驟，主控台讀 repo 檔案——靠此線程讓狀態/VNC 秒級可見。"""
+    import base64
+    pat = (os.environ.get("GH_PAT") or "").strip()
+    if not pat:
+        log("status 推送停用（缺 GH_PAT）")
+        return
+    api = ("https://api.github.com/repos/TommyYeung660/buyip18-checkout"
+           "/contents/status/latest.json")
+    heads = {"Authorization": "Bearer " + pat,
+             "Accept": "application/vnd.github+json",
+             "User-Agent": "buyip18-scanner"}
+    last = None
+    while True:
+        try:
+            cand = None
+            for d in (os.path.join(KEEPER_ENGINE_DIR, "status", "latest.json"),
+                      os.path.join(FALLBACK_ENGINE_DIR, "status", "latest.json")):
+                try:
+                    if os.path.exists(d) and (cand is None or
+                            os.path.getmtime(d) > os.path.getmtime(cand)):
+                        cand = d
+                except Exception:
+                    pass
+            if cand:
+                body = open(cand, "rb").read()
+                if body != last:
+                    sha = None
+                    try:
+                        req = urllib.request.Request(api, headers=heads)
+                        with urllib.request.urlopen(req, timeout=15) as r:
+                            sha = json.loads(r.read()).get("sha")
+                    except Exception:
+                        pass  # 404=檔案未建，直接建立
+                    payload = {"message": "status: live from scanner",
+                               "content": base64.b64encode(body).decode(),
+                               "branch": "main"}
+                    if sha:
+                        payload["sha"] = sha
+                    req = urllib.request.Request(
+                        api, data=json.dumps(payload).encode(),
+                        headers=heads, method="PUT")
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        log("status 已推送 checkout repo http=%d" % r.status)
+                    last = body
+        except Exception as e:
+            log("status 推送失敗: " + str(e)[:80])
+            time.sleep(10)
+        time.sleep(3)
+
+
 if __name__ == "__main__":
+    threading.Thread(target=status_pusher, daemon=True).start()
     sys.exit(main())

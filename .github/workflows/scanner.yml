@@ -85,6 +85,31 @@ jobs:
           Xvfb :99 -screen 0 1280x900x24 > /dev/null 2>&1 &
           sleep 1
 
+      - name: Start VNC + tunnel (live view for keeper)
+        run: |
+          # 與 checkout.yml 同款：隨機密碼只寫 private repo 的 status/latest.json，
+          # 公開 log 只現隧道 URL（無密碼進不去），絕不 echo 密碼
+          sudo apt-get install -y -qq x11vnc fluxbox > /dev/null
+          pip install -q websockify
+          git clone -q --depth 1 https://github.com/novnc/noVNC /tmp/novnc
+          curl -sL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i /tmp/cloudflared.deb > /dev/null
+          VNC_PW=$(head -c 9 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 8)
+          DISPLAY=:99 fluxbox > /dev/null 2>&1 &
+          x11vnc -display :99 -forever -passwd "$VNC_PW" -quiet -rfbport 5900 > /dev/null 2>&1 &
+          /tmp/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 8080 > /tmp/novnc.log 2>&1 &
+          sleep 3
+          nohup cloudflared tunnel --url http://localhost:8080 --no-autoupdate > /tmp/cf.log 2>&1 &
+          U=""
+          for i in $(seq 1 30); do
+            U=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -1)
+            [ -n "$U" ] && break
+            sleep 1
+          done
+          echo "VNC_URL=$U" >> $GITHUB_ENV
+          echo "VNC_PW=$VNC_PW" >> $GITHUB_ENV
+          echo "即時畫面隧道: ${U:-（未取得）}"
+
       - name: Resolve Playwright version
         id: pwv
         run: echo "ver=$(pip show playwright | awk '/^Version/{print $2}')" >> "$GITHUB_OUTPUT"
@@ -109,6 +134,8 @@ jobs:
           PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
           PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
           PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
+          VNC_URL: ${{ env.VNC_URL }}
+          VNC_PW: ${{ env.VNC_PW }}
         run: |
           date +%s > /tmp/jobstart
           python3 - <<'EOF'
@@ -153,7 +180,7 @@ jobs:
           path: |
             scanner.log
             /tmp/checkout-fallback/engine-run.log
-            /tmp/checkout-fallback/status/latest.json
             /tmp/keeper/keeper.log
           # 注意：public repo 的 artifact 人人可下載——絕不上傳引擎截圖（status/*.png
-          # 含帳單頁已填卡號+CVV，9/16 leak 審計同款洩漏路徑）
+          # 含帳單頁已填卡號+CVV，9/16 leak 審計同款洩漏路徑）；
+          # latest.json 亦不上傳（9/17 起含 VNC 密碼，只許推送 private checkout repo）
