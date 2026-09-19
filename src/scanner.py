@@ -530,6 +530,7 @@ def main():
                                     str(res.get("result", ""))[:60]), priority=1)
                     # 只在 keeper 真跑出結帳結果才收工；keeper 失敗落到後備鏈
                     if res and res.get("state") in ("ordered", "declined", "dry-run"):
+                        push_hits_ledger()  # 收工前同步沖帳（daemon 線程會被 exit 殺）
                         return 0
                     if res and res.get("state") == "no-pickup":
                         # 全店無額已被 keeper HTTP 證實——就地重開該 slot 續掃
@@ -545,6 +546,7 @@ def main():
                         bark("⚠️ 下單結果未明",
                              "keeper 停在 buying——不重複下單，請查 Apple 訂單/郵件",
                              priority=2)
+                        push_hits_ledger()
                         return 0
                     log("keeper%d 未成（%s）— 落後備鏈" % (slot, res.get("state", "?")))
                 elif slot is None:
@@ -574,6 +576,7 @@ def main():
                 except Exception as e:
                     log("dispatch 失敗: %s" % e)
                     bark("dispatch 失敗", str(e)[:80], priority=1)
+            push_hits_ledger()  # 命中路徑收工前同步沖帳
             return 0
         if sweep % 20 == 0:
             log("sweep %d | %0.1f 分 | 存活節點 %d | 無貨 | keeper=%d/%d 待命"
@@ -603,6 +606,84 @@ def hit_ledger(**ev):
         pass
 
 
+LEDGER_API = ("https://api.github.com/repos/TommyYeung660/buyip18-checkout"
+              "/contents/status/hits.jsonl")
+LEDGER_PUSHED = set()
+
+
+def push_hits_ledger():
+    """合併去重所有 hits.jsonl（scanner+各 slot 引擎+後備）→ 推 checkout repo。
+    status_pusher 週期呼叫；命中路徑收工前【同步】呼叫——進程 exit 會殺掉
+    daemon 線程，不同步推最後幾行就會丟（hit#20 實證丟了 local/dispatched）。"""
+    import base64
+    import glob
+    pat = (os.environ.get("GH_PAT") or "").strip()
+    if not pat:
+        return False
+    heads = {"Authorization": "Bearer " + pat,
+             "Accept": "application/vnd.github+json",
+             "User-Agent": "buyip18-scanner"}
+    try:
+        lines = []
+        for p in ([HITS_LEDGER]
+                  + glob.glob("/tmp/keeper/k*/engine/status/hits.jsonl")
+                  + [os.path.join(FALLBACK_ENGINE_DIR, "status", "hits.jsonl")]):
+            try:
+                if os.path.exists(p):
+                    lines += [x for x in open(p).read().splitlines() if x.strip()]
+            except Exception:
+                pass
+        if not lines:
+            return False
+
+        def _k(l):
+            try:
+                d = json.loads(l)
+                return (d.get("ts", ""), d.get("event", d.get("state", "")),
+                        d.get("sku", ""), d.get("store", ""))
+            except Exception:
+                return l
+        base = ""
+        try:
+            req = urllib.request.Request(LEDGER_API, headers=heads)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                base = base64.b64decode(json.loads(r.read())["content"]).decode()
+        except Exception:
+            base = ""  # 404=帳本未建
+        merged, seen = [], set()
+        for x in base.splitlines() + lines:
+            k = _k(x)
+            if x.strip() and k not in seen:
+                seen.add(k)
+                merged.append(x)
+        if not (set(map(_k, merged)) - LEDGER_PUSHED):
+            return False
+        sha = None
+        try:
+            req = urllib.request.Request(LEDGER_API, headers=heads)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                sha = json.loads(r.read()).get("sha")
+        except Exception:
+            sha = None
+        payload = {"message": "hits ledger",
+                   "content": base64.b64encode(
+                       ("\n".join(merged) + "\n").encode()).decode(),
+                   "branch": "main"}
+        if sha:
+            payload["sha"] = sha
+        req = urllib.request.Request(
+            LEDGER_API, data=json.dumps(payload).encode(),
+            headers=heads, method="PUT")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            log("hits 帳本已推送 http=%d（%d 行）" % (r.status, len(merged)))
+        LEDGER_PUSHED.clear()
+        LEDGER_PUSHED.update(map(_k, merged))
+        return True
+    except Exception as e:
+        log("hits 帳本推送失敗: " + str(e)[:80])
+        return False
+
+
 def status_pusher():
     """引擎 status/latest.json（keeper+本地後備取較新者）即時推送 checkout repo（private）。
     掃描 job 沒有 git commit 步驟，主控台讀 repo 檔案——靠此線程讓狀態/VNC 秒級可見。"""
@@ -617,9 +698,6 @@ def status_pusher():
              "Accept": "application/vnd.github+json",
              "User-Agent": "buyip18-scanner"}
     last = None
-    led_api = ("https://api.github.com/repos/TommyYeung660/buyip18-checkout"
-               "/contents/status/hits.jsonl")
-    pushed_keys = set()
     while True:
         try:
             cand = None
@@ -656,59 +734,8 @@ def status_pusher():
                     with urllib.request.urlopen(req, timeout=15) as r:
                         log("status 已推送 checkout repo http=%d" % r.status)
                     last = body
-            # ---- 命中帳本：合併 scanner+各 slot 引擎+後備的 hits.jsonl（去重）推 repo
-            import glob
-            lines = []
-            for p in ([HITS_LEDGER]
-                      + glob.glob("/tmp/keeper/k*/engine/status/hits.jsonl")
-                      + [os.path.join(FALLBACK_ENGINE_DIR, "status", "hits.jsonl")]):
-                try:
-                    if os.path.exists(p):
-                        lines += [x for x in open(p).read().splitlines() if x.strip()]
-                except Exception:
-                    pass
-            if lines:
-                def _k(l):
-                    try:
-                        d = json.loads(l)
-                        return (d.get("ts", ""), d.get("event", d.get("state", "")),
-                                d.get("sku", ""), d.get("store", ""))
-                    except Exception:
-                        return l
-                base = ""
-                try:
-                    req = urllib.request.Request(led_api, headers=heads)
-                    with urllib.request.urlopen(req, timeout=15) as r:
-                        base = base64.b64decode(
-                            json.loads(r.read())["content"]).decode()
-                except Exception:
-                    base = ""  # 404=帳本未建
-                merged, seen = [], set()
-                for x in base.splitlines() + lines:
-                    k = _k(x)
-                    if x.strip() and k not in seen:
-                        seen.add(k)
-                        merged.append(x)
-                if set(map(_k, merged)) - pushed_keys:
-                    sha = None
-                    try:
-                        req = urllib.request.Request(led_api, headers=heads)
-                        with urllib.request.urlopen(req, timeout=15) as r:
-                            sha = json.loads(r.read()).get("sha")
-                    except Exception:
-                        sha = None
-                    payload = {"message": "hits ledger",
-                               "content": base64.b64encode(
-                                   ("\n".join(merged) + "\n").encode()).decode(),
-                               "branch": "main"}
-                    if sha:
-                        payload["sha"] = sha
-                    req = urllib.request.Request(
-                        led_api, data=json.dumps(payload).encode(),
-                        headers=heads, method="PUT")
-                    with urllib.request.urlopen(req, timeout=15) as r:
-                        log("hits 帳本已推送 http=%d（%d 行）" % (r.status, len(merged)))
-                    pushed_keys = set(map(_k, merged))
+            # ---- 命中帳本：週期合併去重推 repo（收工前另有同步呼叫）
+            push_hits_ledger()
         except Exception as e:
             log("status 推送失敗: " + str(e)[:80])
             time.sleep(10)
