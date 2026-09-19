@@ -328,18 +328,34 @@ def keeper_start_all(nodes):
     return ok
 
 
-def keeper_restart_dead(nodes, cooldown=120):
-    """逐 slot 自癒：進程死且過冷卻 → 即時重開該 slot（其餘 slot 不受影響）。"""
+def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
+    """逐 slot 自癒：①進程死（過冷卻）→ 重開 ②進程活但卡住（建袋超 7 分未停泊，
+    如 Playwright wedge）→ 殺掉重開。9/19 首次艦隊實證：2 個 slot 卡在建袋期
+    永不自曝（進程活著、狀態檔無更新），死進程規則救不到。"""
     n = 0
     for i in range(len(KEEPER_FLEET)):
         proc = KEEPER_PROCS.get(i)
-        if proc is None or proc.poll() is None:
+        if proc is None:
             continue
-        if time.time() - KEEPER_LASTSTART.get(i, 0) <= cooldown:
+        age = time.time() - KEEPER_LASTSTART.get(i, 0)
+        if proc.poll() is not None:
+            if age <= cooldown:
+                continue
+            log("keeper%d 進程已退（exit=%s）— 即時重開" % (i, proc.returncode))
+            if keeper_start(nodes, i):
+                n += 1
             continue
-        log("keeper%d 進程已退（exit=%s）— 即時重開" % (i, proc.returncode))
-        if keeper_start(nodes, i):
-            n += 1
+        st = keeper_state(i)
+        if st and st.get("state") == "ready":
+            continue                     # 已停泊待命=正常
+        if age > build_deadline:
+            log("keeper%d 建袋超時（%ds 未停泊）— 殺掉重開" % (i, int(age)))
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            if keeper_start(nodes, i):
+                n += 1
     return n
 
 
