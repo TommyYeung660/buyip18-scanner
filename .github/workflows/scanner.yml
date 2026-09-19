@@ -166,6 +166,12 @@ jobs:
       - name: Run scanner loop
         env:
           SCAN_NODES_JSON: ${{ secrets.SCAN_NODES_JSON }}
+          # per-slot 專屬出口：scanner.py 模組載入時算 SLOT_PROXY_COUNT，
+          # keeper_port(slot) 才會回 7892+slot。先前只有 mihomo step 拿到這個
+          # secret（所以 listener 7892-7896 有建），本 step 拿不到 → 常數=0 →
+          # 六個 keeper 全落回 7891 共用免費池，買來的 5 個 IPRoyal IP 從未被使用
+          # （9/19 hit#19 根因：共用出口互相 541 拖死會話）。
+          SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
           SCAN_NODES_FILE: /tmp/nodes.json
           MAX_MINUTES: ${{ inputs.max_minutes || '320' }}
           GH_PAT: ${{ secrets.CHECKOUT_PAT }}
