@@ -200,6 +200,17 @@ def keeper_port(slot):
     return 7892 + slot if slot < SLOT_PROXY_COUNT else 7891
 
 
+# 多卡就緒：SLOT_PROFILES（逗號分隔）第 i 項 → slot i 用哪個付款 profile
+# （PROFILES_JSON 內多 profile；未設＝全部 billy01）。卡 2 到貨：加 profile 檔＋
+# 設 secret 即可，無需改碼。
+_SLOT_PROFILES = [p.strip() for p in
+                  (os.environ.get("SLOT_PROFILES") or "").split(",") if p.strip()]
+
+
+def keeper_profile(slot):
+    return _SLOT_PROFILES[slot] if slot < len(_SLOT_PROFILES) else "billy01"
+
+
 KEEPER_PROCS = {}                                # slot → Popen
 KEEPER_LASTSTART = {}                            # slot → unix ts（冷卻用）
 
@@ -310,7 +321,7 @@ def keeper_start(nodes, slot):
     sku = KEEPER_FLEET[slot]
     env = dict(os.environ, SKU=sku, KEEPER="1", KEEPER_SKUS=sku,
                KEEPER_STATE=state_p, KEEPER_CMD=cmd_p,
-               PROFILE="billy01", DRY_RUN="", ADD_MODE="http",
+               PROFILE=keeper_profile(slot), DRY_RUN="", ADD_MODE="http",
                PROXY_PORT=str(keeper_port(slot)), DISPLAY=":99", RUN_URL="",
                VNC_URL=os.environ.get("VNC_URL", ""),
                VNC_PW=(os.environ.get("VNC_PW")
