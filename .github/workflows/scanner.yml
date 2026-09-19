@@ -165,9 +165,11 @@ jobs:
         run: |
           # 命中後/到時/崩潰都即時 dispatch 下一輪（keeper 空窗從 ~15-30 分壓到冷啟 ~2.5 分）。
           # 防抖：job 生命 <10 分不復活（疑似 crash loop，交 watchdog */15 兜底）。
+          # 豁免：命中收工（/tmp/hit-marker）——9/19 晨兩次命中 run 9-11 分收工被誤當
+          # crash loop 不復活，watchdog cron 遲到=命中後 20+ 分盲窗
           [ -f /tmp/jobstart ] || { echo "無 jobstart — 跳過"; exit 0; }
           AGE=$(( $(date +%s) - $(cat /tmp/jobstart) ))
-          if [ "$AGE" -lt 600 ]; then
+          if [ "$AGE" -lt 600 ] && [ ! -f /tmp/hit-marker ]; then
             echo "job 只跑 ${AGE}s — 疑似 crash loop，不復活（watchdog 兜底）"; exit 0
           fi
           CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \

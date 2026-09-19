@@ -375,6 +375,9 @@ def main():
             time.sleep(600)
             continue
         if hits:
+            # 命中收工的 run 生命常 <10 分（watchdog 班次晨間即中彈）——
+            # 留 marker 讓 Self-resurrect 豁免防抖，免等 cron 遲到的 watchdog
+            open("/tmp/hit-marker", "w").write("1")
             # SKU 優先序照 PARTS 定義（候選偏好），非字母序
             sku = next((p for p in PARTS if p in hits), sorted(hits)[0])
             # 結帳頁靠顯示名稱（Apple {店名}）點選，送店名；缺名時退回店號
