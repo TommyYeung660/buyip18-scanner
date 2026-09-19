@@ -41,6 +41,8 @@ jobs:
       - name: Start mihomo (nodes from secret)
         env:
           SCAN_NODES_JSON: ${{ secrets.SCAN_NODES_JSON }}
+          BD_USER: ${{ secrets.BD_USER }}
+          BD_PASS: ${{ secrets.BD_PASS }}
         run: |
           python3 - <<'EOF'
           import json, os
@@ -56,15 +58,37 @@ jobs:
               return 3
           hk_buy = sorted([n["name"] for n in nodes
                            if "香港" in n["name"]], key=_buy_rank)
+          # Bright Data（選配）：BD_USER/BD_PASS secret 有值才啟用。
+          # 每個 keeper slot 一個專屬 listener（7892+i）釘不同 BD session——
+          # 6 個駐場各自獨立住宅出口 IP，互不牽連（原單出口 6 併發＝541＋同歸於盡風險）。
+          # BD 只用於買單路徑；掃描維持免費節點池（付費 IP 掃描＝純燒錢）。
+          bd_user = (os.environ.get("BD_USER") or "").strip()
+          bd_pass = (os.environ.get("BD_PASS") or "").strip()
+          bd_host = (os.environ.get("BD_HOST") or "brd.superproxy.io").strip()
+          bd_port = int(os.environ.get("BD_PORT") or 22225)
+          bd_slots = int(os.environ.get("BD_SLOTS") or 6)
+          bd_on = bool(bd_user and bd_pass)
+          listeners = [{"name": "buy", "type": "mixed", "port": 7891,
+                        "listen": "127.0.0.1", "proxy": "BUY"}]
+          proxies = list(nodes)
+          if bd_on:
+              for i in range(bd_slots):
+                  nm = "BD%02d" % i
+                  proxies.append({"name": nm, "type": "http", "server": bd_host,
+                                  "port": bd_port,
+                                  "username": "%s-session-slot%02d" % (bd_user, i),
+                                  "password": bd_pass})
+                  listeners.append({"name": "bd-slot%d" % i, "type": "mixed",
+                                    "port": 7892 + i, "listen": "127.0.0.1",
+                                    "proxy": nm})
           cfg = {
             "mixed-port": 7890,
             "external-controller": "127.0.0.1:9090",
             "mode": "rule",
             "log-level": "warning",
             "dns": {"enable": True, "nameserver": ["8.8.8.8", "1.1.1.1"]},
-            "listeners": [{"name": "buy", "type": "mixed", "port": 7891,
-                           "listen": "127.0.0.1", "proxy": "BUY"}],
-            "proxies": nodes,
+            "listeners": listeners,
+            "proxies": proxies,
             "proxy-groups": [
               {"name": "SCAN", "type": "select",
                "proxies": [n["name"] for n in nodes]},
@@ -78,6 +102,8 @@ jobs:
           os.makedirs("/tmp/mihomo-data", exist_ok=True)
           json.dump(cfg, open("/tmp/scanner-mihomo.yaml", "w"), ensure_ascii=False)
           print("節點:", len(nodes), "| BUY 出口:", hk_buy or "（無家寬，退全部）")
+          print("BD 專屬出口:", ("%d 個 slot listener（7892-%d）" % (bd_slots, 7891 + bd_slots))
+                if bd_on else "未啟用（缺 BD_USER/BD_PASS secret）")
           EOF
           nohup mihomo -f /tmp/scanner-mihomo.yaml -d /tmp/mihomo-data > /tmp/mihomo.log 2>&1 &
           for i in $(seq 1 15); do
