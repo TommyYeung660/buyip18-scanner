@@ -29,6 +29,11 @@ NODE_COOLDOWN_S = 900               # 節點單次失敗的冷卻秒數（15 分
 NODE_MAX_STRIKES = 3                # 累計失敗達此數 → 三振出局（該 job 內不再使用）
 SWEEP_PAUSE = (2.0, 4.0)            # 每輪掃描間的基礎停頓
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "320"))
+# 命中冷卻：同 (SKU, 門市) 在冷卻期內不再處理。
+# 動機：命中 miss 之後不再拆艦隊（改 continue 續掃），但同一批庫存會被下一輪
+# sweep 立刻再偵測到——沒有冷卻就會反覆觸發 bark（priority 2 需人工確認）＋
+# 反覆跑後備引擎燒出口。冷卻長度對齊 keeper slot 的 exit 43 後重建時間（~2-3 分）。
+HIT_COOLDOWN_S = int(os.environ.get("HIT_COOLDOWN_S", "300"))
 MIHOMO_API = "http://127.0.0.1:9090"
 PROXY = "http://127.0.0.1:7890"
 
@@ -467,6 +472,24 @@ def bark(title, body, priority=0):
 
 
 # ---------------------------------------------------------------- 主循環
+def fresh_hits(hits, hit_cool, now=None):
+    """濾掉冷卻期內的 (SKU, 門市)。
+
+    hits 形狀：{sku: [(store_code, store_name, quote), ...]}
+    hit_cool 形狀：{(sku, store_code): 到期 epoch}
+    回傳 (fresh, suppressed)：fresh 同 hits 形狀；suppressed 是被濾掉的 key 集合。
+    """
+    now = time.time() if now is None else now
+    fresh, suppressed = {}, set()
+    for s, lst in hits.items():
+        for h in lst:
+            if hit_cool.get((s, h[0]), 0) > now:
+                suppressed.add((s, h[0]))
+                continue
+            fresh.setdefault(s, []).append(h)
+    return fresh, suppressed
+
+
 def main():
     nodes_file = os.environ.get("SCAN_NODES_FILE", "/tmp/nodes.json")
     nodes = [n["name"] for n in json.load(open(nodes_file))]
@@ -478,6 +501,8 @@ def main():
     log("掃描器啟動：節點 %d 個，最長 %d 分鐘" % (len(nodes), MAX_MINUTES))
     keeper_on = keeper_start_all(nodes) > 0
     sweep = 0
+    hit_cool = {}   # (SKU, 店號) -> 冷卻到期 epoch
+    _last_sup = ()  # 上次記錄的抑制集合（變化才記帳，免洗版）
     while now_min() < MAX_MINUTES:
         sweep += 1
         # keeper 艦隊自癒：逐 slot 檢查死亡進程（冷卻 120s）即時重開
@@ -491,9 +516,22 @@ def main():
             time.sleep(600)
             continue
         if hits:
-            # 命中收工的 run 生命常 <10 分（watchdog 班次晨間即中彈）——
-            # 留 marker 讓 Self-resurrect 豁免防抖，免等 cron 遲到的 watchdog
-            open("/tmp/hit-marker", "w").write("1")
+            # 冷卻過濾：只留不在冷卻期內的 (SKU, 門市)。全部被冷卻＝本輪不處理、
+            # 續掃（艦隊保持武裝），以低頻率記帳免洗版。
+            _fresh, _suppressed = fresh_hits(hits, hit_cool)
+            if not _fresh:
+                # 只在抑制集合變化時記一次（免每輪洗版）
+                _k = tuple(sorted(_suppressed))
+                if _k != _last_sup:
+                    _last_sup = _k
+                    _txt = ",".join("%s@%s" % x for x in _k)
+                    log("命中仍在冷卻期（%s）— 續掃（不拆艦隊）" % _txt[:80])
+                    hit_ledger(event="hit-cooldown", state="suppressed",
+                               detail=_txt[:80])
+                time.sleep(random.uniform(*SWEEP_PAUSE))
+                continue
+            _last_sup = ()
+            hits = _fresh
             # SKU 優先序照 PARTS 定義（候選偏好），非字母序
             sku = next((p for p in PARTS if p in hits), sorted(hits)[0])
             # 結帳頁靠顯示名稱（Apple {店名}）點選，送店名；缺名時退回店號
@@ -501,6 +539,9 @@ def main():
             if not store:
                 store = hits[sku][0][0]
             store_code = hits[sku][0][0]  # R###（方案 B HTTP selectStore 用）
+            # 立刻把這一對放進冷卻：keeper exit 43 後需 ~2-3 分重建，期間重複偵測
+            # 只會重複發緊急通知＋重複跑後備。其他門市／其他 SKU 不受影響。
+            hit_cool[(sku, store_code)] = time.time() + HIT_COOLDOWN_S
             detail = "; ".join("%s@%s(%s)" % (s, n, q)
                                for s, n, q in [(h[1], h[0], h[2])
                                                for h in hits[sku]][:3])
@@ -530,6 +571,9 @@ def main():
                                     str(res.get("result", ""))[:60]), priority=1)
                     # 只在 keeper 真跑出結帳結果才收工；keeper 失敗落到後備鏈
                     if res and res.get("state") in ("ordered", "declined", "dry-run"):
+                        # 只有真的產出結帳結果才收工。marker 讓 Self-resurrect 豁免
+                        # 10 分防抖（命中收工的 run 生命常 <10 分）
+                        open("/tmp/hit-marker", "w").write("1")
                         push_hits_ledger()  # 收工前同步沖帳（daemon 線程會被 exit 殺）
                         return 0
                     if res and res.get("state") == "no-pickup":
@@ -546,6 +590,7 @@ def main():
                         bark("⚠️ 下單結果未明",
                              "keeper 停在 buying——不重複下單，請查 Apple 訂單/郵件",
                              priority=2)
+                        open("/tmp/hit-marker", "w").write("1")
                         push_hits_ledger()
                         return 0
                     log("keeper%d 未成（%s）— 落後備鏈" % (slot, res.get("state", "?")))
@@ -576,8 +621,22 @@ def main():
                 except Exception as e:
                     log("dispatch 失敗: %s" % e)
                     bark("dispatch 失敗", str(e)[:80], priority=1)
-            push_hits_ledger()  # 命中路徑收工前同步沖帳
-            return 0
+            if _lst in ("ordered", "declined", "dry-run"):
+                # 真的產出結帳結果 → 收工（與 keeper 路徑同語義）
+                open("/tmp/hit-marker", "w").write("1")
+                push_hits_ledger()
+                return 0
+            push_hits_ledger()  # 沖帳
+            # 後備鏈用完仍未成交 = miss。原本這裡 return 0 會拆掉整個艦隊，
+            # 重建需 ~3 分鐘——而晨間命中是叢集出現的（9/20 06:53/07:04/07:08
+            # 三個在 15 分鐘內），第 2/3 發因此必定落在重建盲窗裡。9/20 07:04
+            # 實證：keeper2 開機 34 秒被判定未就緒而跳過，直接走後備 no-pickup。
+            # 改為續掃：艦隊保持武裝，其他 SKU／門市立刻可戰；剛處理的這一對
+            # 已在冷卻期內，不會重複觸發通知或重複跑後備。
+            log("後備鏈未成交（miss）— 續掃，不拆艦隊（keeper 待命保持）")
+            hit_ledger(event="continue-scan", sku=sku, store=store,
+                       state=_lst or ("ran" if ran else "skipped"))
+            continue
         if sweep % 20 == 0:
             log("sweep %d | %0.1f 分 | 存活節點 %d | 無貨 | keeper=%d/%d 待命"
                 % (sweep, now_min(),
