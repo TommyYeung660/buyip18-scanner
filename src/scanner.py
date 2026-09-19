@@ -188,6 +188,18 @@ KEEPER_BASE = "/tmp/keeper"                      # slot 目錄 /tmp/keeper/k{i}/
 KEEPER_ENGINE_BASE = "/tmp/checkout-engine"      # 基礎 clone（各 slot copytree 複製）
 FALLBACK_ENGINE_DIR = "/tmp/checkout-fallback"   # 命中重走的後備引擎（勿與 keeper 共用目錄）
 KEEPER_FLEET = list(PARTS)[:max(1, int(os.environ.get("KEEPER_SLOTS", "6") or 6))]
+# per-slot 專屬出口（供應商無關）：SLOT_PROXIES_JSON 第 i 項 → slot i 專用 listener
+# 7892+i（scanner.yml 生成）；沒配到的 slot 或無 secret → 沿用免費 BUY 池 7891
+try:
+    SLOT_PROXY_COUNT = len(json.loads(os.environ.get("SLOT_PROXIES_JSON") or "[]"))
+except Exception:
+    SLOT_PROXY_COUNT = 0
+
+
+def keeper_port(slot):
+    return 7892 + slot if slot < SLOT_PROXY_COUNT else 7891
+
+
 KEEPER_PROCS = {}                                # slot → Popen
 KEEPER_LASTSTART = {}                            # slot → unix ts（冷卻用）
 
@@ -299,7 +311,7 @@ def keeper_start(nodes, slot):
     env = dict(os.environ, SKU=sku, KEEPER="1", KEEPER_SKUS=sku,
                KEEPER_STATE=state_p, KEEPER_CMD=cmd_p,
                PROFILE="billy01", DRY_RUN="", ADD_MODE="http",
-               PROXY_PORT="7891", DISPLAY=":99", RUN_URL="",
+               PROXY_PORT=str(keeper_port(slot)), DISPLAY=":99", RUN_URL="",
                VNC_URL=os.environ.get("VNC_URL", ""),
                VNC_PW=(os.environ.get("VNC_PW")
                        or (open("/tmp/vncpw").read().strip()
@@ -310,7 +322,9 @@ def keeper_start(nodes, slot):
         stderr=subprocess.STDOUT)
     KEEPER_PROCS[slot] = proc
     KEEPER_LASTSTART[slot] = time.time()
-    log("keeper%d 已啟動（pid %d）— 純袋 %s 預熱待命" % (slot, proc.pid, sku))
+    log("keeper%d 已啟動（pid %d）— 純袋 %s 預熱待命（出口 %d%s）"
+        % (slot, proc.pid, sku, keeper_port(slot),
+           "=專屬 IP" if keeper_port(slot) != 7891 else "=免費 BUY 池"))
     return True
 
 
