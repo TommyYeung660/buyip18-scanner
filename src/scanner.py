@@ -179,46 +179,68 @@ def dispatch_checkout(sku, store):
         return r.status
 
 
-# ---------------------------------------------------------------- 駐場結帳（KEEPER）
-# 掃描 job 常駐一個「預熱結帳會話」：袋已填、訪客已過、停在履約頁待命。
-# 命中且 SKU 吻合 → 掃描器經命令檔叫 keeper 就地選店下單（免預熱/入袋/訪客 ~45 秒）。
-KEEPER_STATE = "/tmp/keeper/state.json"
-KEEPER_CMD = "/tmp/keeper/command.json"
-KEEPER_ENGINE_DIR = "/tmp/checkout-engine"      # keeper 常駐引擎
-KEEPER_PROC = None                              # keeper 進程柄（死後即時重開）
-FALLBACK_ENGINE_DIR = "/tmp/checkout-fallback"  # 命中重走的後備引擎（勿與 keeper 共用目錄）
+# ---------------------------------------------------------------- 駐場結帳（KEEPER 艦隊）
+# 每個 SKU 一個駐場 slot：袋純一 SKU×BUY_COUNT、各自預熱會話停 review+RETAIL 待命。
+# 命中哪個 SKU 就叫哪個 slot 就地選店下單（2-6 秒）——**永不需要換袋**
+# （9/19 用戶：單 keeper 不中要換袋＝幾乎必敗；6 SKU→6 slot 全覆蓋）。
+# 資源：每 slot ≈ 400MB Chromium（runner 16GB 充足）；分兩波錯開啟動免搶 CPU。
+KEEPER_BASE = "/tmp/keeper"                      # slot 目錄 /tmp/keeper/k{i}/
+KEEPER_ENGINE_BASE = "/tmp/checkout-engine"      # 基礎 clone（各 slot copytree 複製）
+FALLBACK_ENGINE_DIR = "/tmp/checkout-fallback"   # 命中重走的後備引擎（勿與 keeper 共用目錄）
+KEEPER_FLEET = list(PARTS)[:max(1, int(os.environ.get("KEEPER_SLOTS", "6") or 6))]
+KEEPER_PROCS = {}                                # slot → Popen
+KEEPER_LASTSTART = {}                            # slot → unix ts（冷卻用）
 
 
-def keeper_state():
+def _kslot_dir(i):
+    d = os.path.join(KEEPER_BASE, "k%d" % i)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def keeper_paths(i):
+    d = _kslot_dir(i)
+    return (os.path.join(d, "state.json"), os.path.join(d, "command.json"))
+
+
+def keeper_state(i):
     try:
-        return json.load(open(KEEPER_STATE))
+        return json.load(open(keeper_paths(i)[0]))
     except Exception:
         return None
 
 
-def keeper_fire(sku, store, store_code=""):
-    os.makedirs(os.path.dirname(KEEPER_CMD), exist_ok=True)
+def keeper_slot_for(sku):
+    s = (sku or "").strip().upper()
+    for i, p in enumerate(KEEPER_FLEET):
+        if p.upper() == s:
+            return i
+    return None
+
+
+def keeper_fire(i, sku, store, store_code=""):
+    _, cmd = keeper_paths(i)
     json.dump({"action": "buy", "sku": sku, "store": store,
                "store_code": store_code},
-              open(KEEPER_CMD, "w"), ensure_ascii=False)
-    log("keeper 命令已下（%s @ %s/%s）— 等待結果" % (sku, store, store_code or "?"))
+              open(cmd, "w"), ensure_ascii=False)
+    log("keeper%d 命令已下（%s @ %s/%s）— 等待結果"
+        % (i, sku, store, store_code or "?"))
 
 
-def keeper_wait(timeout_s):
-    """輪詢 keeper state 直到真終態或逾時。
-    keeper-swapping 是長流程（外部 d11bb25：換袋→重走→下單），提前當終態返回
-    會令掃描器收工殺掉 keeper=換袋腰斬（9/18 晨 3 次命中的實測教訓）。
-    進程死而無終態（裸崩沒寫 state，如頁面死鎖）→ ~2 秒退回 keeper-failed，
-    防 600 秒乾等燒掉命中窗口。"""
+def keeper_wait(i, timeout_s):
+    """輪詢第 i 個 keeper 的 state 直到真終態或逾時。
+    進程死而無終態（裸崩沒寫 state）→ ~2 秒退回 keeper-failed，防 600 秒乾等。
+    其餘 slot 不受影響（多 keeper 各自獨立）。"""
     t0 = time.time()
     last = None
     dead_polls = 0
+    proc = KEEPER_PROCS.get(i)
     while time.time() - t0 < timeout_s:
-        last = keeper_state()
+        last = keeper_state(i)
         if last and last.get("state") not in (
                 "ready", "buying", "selected", "keeper-swapping"):
             return last
-        if KEEPER_PROC is not None and KEEPER_PROC.poll() is not None:
+        if proc is not None and proc.poll() is not None:
             dead_polls += 1
             if dead_polls >= 7:
                 return {"state": "keeper-failed",
@@ -229,8 +251,18 @@ def keeper_wait(timeout_s):
     return last or {"state": "timeout"}
 
 
-def keeper_start(nodes):
-    """啟動駐場引擎：clone checkout repo → KEEPER 模式跑 checkout.py（背景、家寬出口 7891）。"""
+def keeper_ready_count():
+    n = 0
+    for i in range(len(KEEPER_FLEET)):
+        p = KEEPER_PROCS.get(i)
+        if p is not None and p.poll() is None \
+                and (keeper_state(i) or {}).get("state") == "ready":
+            n += 1
+    return n
+
+
+def keeper_start(nodes, slot):
+    """啟動第 slot 個駐場引擎（純袋 = KEEPER_FLEET[slot]）。回傳 True=已起。"""
     import shutil
     import subprocess
     pat = os.environ.get("GH_PAT", "").strip()
@@ -240,39 +272,75 @@ def keeper_start(nodes):
     if not [n for n in nodes if "家宽" in n and "香港" in n]:
         log("keeper 未啟用（節點池無香港家寬）")
         return False
-    shutil.rmtree(KEEPER_ENGINE_DIR, ignore_errors=True)
-    r = subprocess.run(
-        ["git", "clone", "-q", "--depth", "1",
-         "https://x-access-token:%s@github.com/TommyYeung660/buyip18-checkout" % pat,
-         KEEPER_ENGINE_DIR],
-        capture_output=True, text=True)
-    if r.returncode != 0:
-        log("keeper clone 失敗: " + (r.stderr or "")[-70:])
+    if not os.path.exists(os.path.join(KEEPER_ENGINE_BASE, "checkout.py")):
+        shutil.rmtree(KEEPER_ENGINE_BASE, ignore_errors=True)
+        r = subprocess.run(
+            ["git", "clone", "-q", "--depth", "1",
+             "https://x-access-token:%s@github.com/TommyYeung660/buyip18-checkout" % pat,
+             KEEPER_ENGINE_BASE],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            log("keeper 基礎 clone 失敗: " + (r.stderr or "")[-70:])
+            return False
+    eng = os.path.join(_kslot_dir(slot), "engine")
+    shutil.rmtree(eng, ignore_errors=True)
+    try:
+        shutil.copytree(KEEPER_ENGINE_BASE, eng, symlinks=True)
+    except Exception as e:
+        log("keeper%d 引擎複製失敗: %s" % (slot, repr(e)[:60]))
         return False
-    os.makedirs("/tmp/keeper", exist_ok=True)
-    for f in (KEEPER_STATE, KEEPER_CMD):
+    state_p, cmd_p = keeper_paths(slot)
+    for f in (state_p, cmd_p):
         try:
             os.remove(f)
         except Exception:
             pass
-    keeper_skus = PARTS[0]  # 停泊袋＝單一 SKU×2（引擎 KEEPER 純袋邏輯對應）；
-    # 非此 SKU 命中由 review_wait 秒退 sku-mismatch 走本地引擎純命中袋
-    env = dict(os.environ, SKU=PARTS[0], KEEPER="1", KEEPER_SKUS=keeper_skus,
-               KEEPER_STATE=KEEPER_STATE, KEEPER_CMD=KEEPER_CMD,
+    sku = KEEPER_FLEET[slot]
+    env = dict(os.environ, SKU=sku, KEEPER="1", KEEPER_SKUS=sku,
+               KEEPER_STATE=state_p, KEEPER_CMD=cmd_p,
                PROFILE="billy01", DRY_RUN="", ADD_MODE="http",
                PROXY_PORT="7891", DISPLAY=":99", RUN_URL="",
                VNC_URL=os.environ.get("VNC_URL", ""),
                VNC_PW=(os.environ.get("VNC_PW")
                        or (open("/tmp/vncpw").read().strip()
                            if os.path.exists("/tmp/vncpw") else "")))
-    global KEEPER_PROC
     proc = subprocess.Popen(
-        ["python3", "checkout.py"], cwd=KEEPER_ENGINE_DIR, env=env,
-        stdout=open("/tmp/keeper/keeper.log", "w"), stderr=subprocess.STDOUT)
-    KEEPER_PROC = proc
-    log("keeper 已啟動（pid %d）— 預熱結帳會話待命（袋內候選 %s）"
-        % (proc.pid, keeper_skus))
+        ["python3", "checkout.py"], cwd=eng, env=env,
+        stdout=open(os.path.join(_kslot_dir(slot), "keeper.log"), "w"),
+        stderr=subprocess.STDOUT)
+    KEEPER_PROCS[slot] = proc
+    KEEPER_LASTSTART[slot] = time.time()
+    log("keeper%d 已啟動（pid %d）— 純袋 %s 預熱待命" % (slot, proc.pid, sku))
     return True
+
+
+def keeper_start_all(nodes):
+    """兩波錯開啟動（6 個 Chromium 同時起跑會搶 CPU/觸發風控）。"""
+    ok = 0
+    fleet = KEEPER_FLEET
+    for wave in (range(0, 3), range(3, len(fleet))):
+        for i in wave:
+            if keeper_start(nodes, i):
+                ok += 1
+            time.sleep(8)
+    log("keeper 艦隊啟動：%d/%d 個（覆蓋 %s）"
+        % (ok, len(fleet), ",".join(fleet)))
+    return ok
+
+
+def keeper_restart_dead(nodes, cooldown=120):
+    """逐 slot 自癒：進程死且過冷卻 → 即時重開該 slot（其餘 slot 不受影響）。"""
+    n = 0
+    for i in range(len(KEEPER_FLEET)):
+        proc = KEEPER_PROCS.get(i)
+        if proc is None or proc.poll() is None:
+            continue
+        if time.time() - KEEPER_LASTSTART.get(i, 0) <= cooldown:
+            continue
+        log("keeper%d 進程已退（exit=%s）— 即時重開" % (i, proc.returncode))
+        if keeper_start(nodes, i):
+            n += 1
+    return n
 
 
 def local_checkout(sku, store, nodes):
@@ -367,18 +435,13 @@ def main():
     nodes = [n for n in nodes if not any(k in n for k in bad_kw)]
     log("剔除壞節點 %d 個，可用 %d 個" % (len(dropped), len(nodes)))
     log("掃描器啟動：節點 %d 個，最長 %d 分鐘" % (len(nodes), MAX_MINUTES))
-    keeper_on = keeper_start(nodes)
-    last_kstart = time.time()
+    keeper_on = keeper_start_all(nodes) > 0
     sweep = 0
     while now_min() < MAX_MINUTES:
         sweep += 1
-        # keeper 進程退出（判死自曝/讓位/崩潰）→ 冷卻 120s 即時重開，盲窗壓最短
-        if (keeper_on and KEEPER_PROC is not None
-                and KEEPER_PROC.poll() is not None
-                and time.time() - last_kstart > 120):
-            last_kstart = time.time()
-            log("keeper 進程已退（exit=%s）— 即時重開" % KEEPER_PROC.returncode)
-            keeper_on = keeper_start(nodes)
+        # keeper 艦隊自癒：逐 slot 檢查死亡進程（冷卻 120s）即時重開
+        if keeper_on:
+            keeper_restart_dead(nodes)
         try:
             hits = sweep_once(nodes)
         except RuntimeError as e:
@@ -403,42 +466,44 @@ def main():
             log("★ 有貨！ %s → %s" % (sku, detail))
             bark("iPhone 18 有貨！",
                  "%s @ %s — 自動下單已觸發" % (sku, detail[:60]), priority=2)
-            # 優先序：keeper 駐場會話（秒級）→ 本地結帳（~60-90s）→ 派工（~3 分）
+            # 優先序：命中 SKU 的專屬 keeper slot（秒級）→ 本地結帳（~60-90s）→ 派工（~3 分）
             if keeper_on:
-                st = keeper_state()
-                # 不等預熱：keeper 未就緒（狀態 None=建袋中/剛崩）即走本地引擎——
+                slot = keeper_slot_for(sku)
+                st = keeper_state(slot) if slot is not None else None
+                # 不等預熱：slot 未就緒（狀態 None=建袋中/剛崩）即走本地引擎——
                 # 100 秒乾等只會把命中→下單拖成 160+ 秒（9/19 晨 #18/#19 敗因）；
-                # 命中落在 keeper 推進期時命令檔會被停泊後 0.3 秒拾取，無需等
-                if st and st.get("state") == "ready":
-                    keeper_fire(sku, store, store_code)
-                    res = keeper_wait(600)
-                    log("keeper 結果: %s" % json.dumps(res, ensure_ascii=False)[:140])
+                # 命中落在 slot 推進期時命令檔會被停泊後 0.3 秒拾取，無需等
+                if slot is not None and st and st.get("state") == "ready":
+                    keeper_fire(slot, sku, store, store_code)
+                    res = keeper_wait(slot, 600)
+                    log("keeper%d 結果: %s（其餘 slot 照常待命）"
+                        % (slot, json.dumps(res, ensure_ascii=False)[:140]))
                     bark("iPhone 18 下單結果",
                          "%s %s" % (res.get("state", "?"),
                                     str(res.get("result", ""))[:60]), priority=1)
-                    # 只在 keeper 真跑出結帳結果才收工；keeper 失敗（no-pickup/
-                    # mismatch/dead/逾時）落到後備鏈（9/18 晨發現的設計缺陷修正）
+                    # 只在 keeper 真跑出結帳結果才收工；keeper 失敗落到後備鏈
                     if res and res.get("state") in ("ordered", "declined", "dry-run"):
                         return 0
                     if res and res.get("state") == "no-pickup":
-                        # 全店無額已被 keeper HTTP 證實——8 分鐘後備引擎只會重演，
-                        # 就地重開 keeper 續掃（盲窗 ~90 秒 vs 後備 8 分）
-                        log("keeper no-pickup（全店無額）— 免後備，就地重開續掃")
-                        keeper_on = keeper_start(nodes)
+                        # 全店無額已被 keeper HTTP 證實——就地重開該 slot 續掃
+                        log("keeper%d no-pickup（全店無額）— 免後備，就地重開續掃" % slot)
+                        keeper_start(nodes, slot)
                         continue
                     # buying 逾時＝placeOrder 可能已在途——加時 180 秒等真終態；
                     # 仍不明則不落本地引擎（雙訂單風險），緊急通知交人工確認
                     if res and res.get("state") == "buying":
-                        log("keeper 停在 buying — 加時 180 秒等終態（防重複下單）")
-                        res = keeper_wait(180)
+                        log("keeper%d 停在 buying — 加時 180 秒等終態（防重複下單）" % slot)
+                        res = keeper_wait(slot, 180)
                     if res and res.get("state") == "buying":
                         bark("⚠️ 下單結果未明",
                              "keeper 停在 buying——不重複下單，請查 Apple 訂單/郵件",
                              priority=2)
                         return 0
-                    log("keeper 未成（%s）— 落後備鏈" % res.get("state", "?"))
-                if st:
-                    log("keeper 狀態=%s 不可用 — 走後備" % st.get("state"))
+                    log("keeper%d 未成（%s）— 落後備鏈" % (slot, res.get("state", "?")))
+                elif slot is None:
+                    log("命中 SKU %s 無專屬 slot（艦隊外）— 落後備鏈" % sku)
+                elif st:
+                    log("keeper%d 狀態=%s 不可用 — 走後備" % (slot, st.get("state")))
             ran = False
             try:
                 ran = local_checkout(sku, store, nodes)
@@ -452,12 +517,12 @@ def main():
                     bark("dispatch 失敗", str(e)[:80], priority=1)
             return 0
         if sweep % 20 == 0:
-            log("sweep %d | %0.1f 分 | 存活節點 %d | 無貨 | keeper=%s"
+            log("sweep %d | %0.1f 分 | 存活節點 %d | 無貨 | keeper=%d/%d 待命"
                 % (sweep, now_min(),
                    len([n for n in nodes
                         if node_dead.get(n, 0) <= time.time()
                         and node_strikes.get(n, 0) < NODE_MAX_STRIKES]),
-                   (keeper_state() or {}).get("state", "-")))
+                   keeper_ready_count(), len(KEEPER_FLEET)))
         time.sleep(random.uniform(*SWEEP_PAUSE))
     log("到時收工，等 watchdog 重啟")
     return 0
@@ -480,8 +545,12 @@ def status_pusher():
     while True:
         try:
             cand = None
-            for d in (os.path.join(KEEPER_ENGINE_DIR, "status", "latest.json"),
-                      os.path.join(FALLBACK_ENGINE_DIR, "status", "latest.json")):
+            # 全艦隊 slot 的 status + 本地後備，取 mtime 最新者＝正在動的那個
+            paths = [os.path.join(FALLBACK_ENGINE_DIR, "status", "latest.json")]
+            for i in range(len(KEEPER_FLEET)):
+                paths.append(os.path.join(_kslot_dir(i), "engine",
+                                          "status", "latest.json"))
+            for d in paths:
                 try:
                     if os.path.exists(d) and (cand is None or
                             os.path.getmtime(d) > os.path.getmtime(cand)):

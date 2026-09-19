@@ -194,7 +194,7 @@ jobs:
           path: |
             scanner.log
             /tmp/checkout-fallback/engine-run.log
-            /tmp/keeper/keeper.log
+            /tmp/keeper/k*/keeper.log
           # 注意：public repo 的 artifact 人人可下載——絕不上傳引擎截圖（status/*.png
           # 含帳單頁已填卡號+CVV，9/16 leak 審計同款洩漏路徑）；
           # latest.json 亦不上傳（9/17 起含 VNC 密碼，只許推送 private checkout repo）
