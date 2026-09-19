@@ -117,7 +117,10 @@ jobs:
             sleep 1
           done
           echo "VNC_URL=$U" >> $GITHUB_ENV
-          echo "VNC_PW=$VNC_PW" >> $GITHUB_ENV
+          # 密碼不進 GITHUB_ENV——env 值會被印進每個 step 的 env dump（公開 log），
+          # 改落檔由 scanner.py 讀取（9/19 體檢發現的洩漏路徑）
+          printf '%s' "$VNC_PW" > /tmp/vncpw
+          chmod 600 /tmp/vncpw
           echo "即時畫面隧道: ${U:-（未取得）}"
 
       - name: Resolve Playwright version
@@ -145,7 +148,6 @@ jobs:
           PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
           PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
           VNC_URL: ${{ env.VNC_URL }}
-          VNC_PW: ${{ env.VNC_PW }}
         run: |
           date +%s > /tmp/jobstart
           python3 - <<'EOF'

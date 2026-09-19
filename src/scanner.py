@@ -250,7 +250,9 @@ def keeper_start(nodes):
                PROFILE="billy01", DRY_RUN="", ADD_MODE="http",
                PROXY_PORT="7891", DISPLAY=":99", RUN_URL="",
                VNC_URL=os.environ.get("VNC_URL", ""),
-               VNC_PW=os.environ.get("VNC_PW", ""))
+               VNC_PW=(os.environ.get("VNC_PW")
+                       or (open("/tmp/vncpw").read().strip()
+                           if os.path.exists("/tmp/vncpw") else "")))
     global KEEPER_PROC
     proc = subprocess.Popen(
         ["python3", "checkout.py"], cwd=KEEPER_ENGINE_DIR, env=env,
@@ -288,7 +290,9 @@ def local_checkout(sku, store, nodes):
                DRY_RUN="", ADD_MODE="http", PROXY_PORT="7891",
                DISPLAY=":99", RUN_URL="",
                VNC_URL=os.environ.get("VNC_URL", ""),
-               VNC_PW=os.environ.get("VNC_PW", ""))
+               VNC_PW=(os.environ.get("VNC_PW")
+                       or (open("/tmp/vncpw").read().strip()
+                           if os.path.exists("/tmp/vncpw") else "")))
     log("本地結帳引擎啟動（命中就地執行，家寬出口 7891）")
     try:
         r = subprocess.run(["python3", "checkout.py"], cwd=tmp, env=env,
