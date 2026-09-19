@@ -207,14 +207,24 @@ def keeper_fire(sku, store, store_code=""):
 def keeper_wait(timeout_s):
     """輪詢 keeper state 直到真終態或逾時。
     keeper-swapping 是長流程（外部 d11bb25：換袋→重走→下單），提前當終態返回
-    會令掃描器收工殺掉 keeper=換袋腰斬（9/18 晨 3 次命中的實測教訓）。"""
+    會令掃描器收工殺掉 keeper=換袋腰斬（9/18 晨 3 次命中的實測教訓）。
+    進程死而無終態（裸崩沒寫 state，如頁面死鎖）→ ~2 秒退回 keeper-failed，
+    防 600 秒乾等燒掉命中窗口。"""
     t0 = time.time()
     last = None
+    dead_polls = 0
     while time.time() - t0 < timeout_s:
         last = keeper_state()
         if last and last.get("state") not in (
                 "ready", "buying", "selected", "keeper-swapping"):
             return last
+        if KEEPER_PROC is not None and KEEPER_PROC.poll() is not None:
+            dead_polls += 1
+            if dead_polls >= 7:
+                return {"state": "keeper-failed",
+                        "reason": "proc-dead-no-terminal"}
+        else:
+            dead_polls = 0
         time.sleep(0.3)  # 命令拾取與結果回傳都快（原 3s）
     return last or {"state": "timeout"}
 
@@ -245,7 +255,8 @@ def keeper_start(nodes):
             os.remove(f)
         except Exception:
             pass
-    keeper_skus = ",".join(PARTS[:2])  # 袋內 = 候選偏好前兩個（hint 排最前+次選）
+    keeper_skus = PARTS[0]  # 停泊袋＝單一 SKU×2（引擎 KEEPER 純袋邏輯對應）；
+    # 非此 SKU 命中由 review_wait 秒退 sku-mismatch 走本地引擎純命中袋
     env = dict(os.environ, SKU=PARTS[0], KEEPER="1", KEEPER_SKUS=keeper_skus,
                KEEPER_STATE=KEEPER_STATE, KEEPER_CMD=KEEPER_CMD,
                PROFILE="billy01", DRY_RUN="", ADD_MODE="http",
@@ -395,14 +406,9 @@ def main():
             # 優先序：keeper 駐場會話（秒級）→ 本地結帳（~60-90s）→ 派工（~3 分）
             if keeper_on:
                 st = keeper_state()
-                if not st:
-                    log("keeper 預熱中 — 等待就緒（最長 100 秒）")
-                    t0 = time.time()
-                    while time.time() - t0 < 100:
-                        st = keeper_state()
-                        if st:
-                            break
-                        time.sleep(2)
+                # 不等預熱：keeper 未就緒（狀態 None=建袋中/剛崩）即走本地引擎——
+                # 100 秒乾等只會把命中→下單拖成 160+ 秒（9/19 晨 #18/#19 敗因）；
+                # 命中落在 keeper 推進期時命令檔會被停泊後 0.3 秒拾取，無需等
                 if st and st.get("state") == "ready":
                     keeper_fire(sku, store, store_code)
                     res = keeper_wait(600)
@@ -420,6 +426,16 @@ def main():
                         log("keeper no-pickup（全店無額）— 免後備，就地重開續掃")
                         keeper_on = keeper_start(nodes)
                         continue
+                    # buying 逾時＝placeOrder 可能已在途——加時 180 秒等真終態；
+                    # 仍不明則不落本地引擎（雙訂單風險），緊急通知交人工確認
+                    if res and res.get("state") == "buying":
+                        log("keeper 停在 buying — 加時 180 秒等終態（防重複下單）")
+                        res = keeper_wait(180)
+                    if res and res.get("state") == "buying":
+                        bark("⚠️ 下單結果未明",
+                             "keeper 停在 buying——不重複下單，請查 Apple 訂單/郵件",
+                             priority=2)
+                        return 0
                     log("keeper 未成（%s）— 落後備鏈" % res.get("state", "?"))
                 if st:
                     log("keeper 狀態=%s 不可用 — 走後備" % st.get("state"))
