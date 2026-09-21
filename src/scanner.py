@@ -443,9 +443,25 @@ def local_checkout(sku, store, nodes):
         return True
     open(os.path.join(tmp, "engine-run.log"), "w").write(r.stdout or "")
     for line in (r.stdout or "").strip().splitlines()[-12:]:
-        log("引擎| " + line)
+        log("引擎| " + _mask_secrets(line))
     log("本地結帳引擎結束 exit=%d" % r.returncode)
     return True
+
+
+def _mask_secrets(line):
+    """遮掉引擎輸出裡的敏感殘留後才回印到 job log。
+
+    scanner repo 是 **public**，而本地引擎的 stdout 最後 12 行會被 log("引擎| ...")
+    回印。引擎本身只印卡號末四碼與 CVV 的布林值（不印全號），但末四碼＋profile
+    名稱出現在公開日誌仍是不必要的曝露——專案既有規則就是公開產物不帶帳單資訊。
+    這裡做最後一道遮罩：任何 12 位以上數字串（卡號）、「尾四 N」、長 token 一律打碼。
+    """
+    import re as _re
+    t = str(line)
+    t = _re.sub(r"尾四\s*\d{2,}", "尾四 ****", t)
+    t = _re.sub(r"\b\d{12,19}\b", "<CARD>", t)
+    t = _re.sub(r"\b\d{3,4}\b(?=\s*(?:CVV|cvv))", "<CVV>", t)
+    return t[:300]
 
 
 def pushover(title, body, priority=0):
