@@ -799,6 +799,24 @@ def status_pusher():
                     pass
             if cand:
                 body = open(cand, "rb").read()
+                # 附上「每個 slot 現在什麼狀態」：latest.json 是 6 個 slot 取 mtime
+                # 最新者覆蓋而成的單一檔，光看它分不出「艦隊有幾個真的武裝待命」。
+                # 而命中當下剛好有幾個 slot 在 review，才是決定成敗的量。
+                # 只加欄位、不改既有語義；失敗就照舊推送不阻斷。
+                try:
+                    _slots = {}
+                    for i in range(len(KEEPER_FLEET)):
+                        _st = keeper_state(i) or {}
+                        _slots[str(i)] = "%s%s" % (
+                            _st.get("state") or "-",
+                            ("@" + str(_st.get("park_store"))) if _st.get("park_store") else "")
+                    _d = json.loads(body.decode("utf-8"))
+                    _d["slots"] = _slots
+                    _d["slots_ready"] = sum(1 for v in _slots.values()
+                                            if v.startswith("review"))
+                    body = json.dumps(_d, ensure_ascii=False).encode("utf-8")
+                except Exception:
+                    pass
                 if body != last:
                     sha = None
                     try:
