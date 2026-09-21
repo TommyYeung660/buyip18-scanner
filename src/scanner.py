@@ -255,6 +255,20 @@ def keeper_fire(i, sku, store, store_code=""):
         % (i, sku, store, store_code or "?"))
 
 
+def keeper_fire_park(i, store_code, store="", reason="post-hit"):
+    """動態停泊命令：叫第 i 個 slot 把停泊狀態推進到「已選店 + contact + billing」。
+
+    何時發：命中後立刻（該店剛出過貨，庫存可能還在，selectStore 最有機會成功）。
+    停泊建立需要庫存——非窗口期做不出來（selectStore 會 302 sorry），所以只能
+    趁命中後補發。見 docs/DYNAMIC_PARKING_DESIGN.md。
+    """
+    _, cmd = keeper_paths(i)
+    json.dump({"action": "park", "store_code": (store_code or "").upper(),
+               "store": store, "reason": reason},
+              open(cmd, "w"), ensure_ascii=False)
+    log("keeper%d 停泊命令已下（%s / %s）" % (i, store_code or "?", reason))
+
+
 def keeper_wait(i, timeout_s):
     """輪詢第 i 個 keeper 的 state 直到真終態或逾時。
     進程死而無終態（裸崩沒寫 state）→ ~2 秒退回 keeper-failed，防 600 秒乾等。
@@ -562,10 +576,21 @@ def main():
                     res = keeper_wait(slot, 600)
                     log("keeper%d 結果: %s（其餘 slot 照常待命）"
                         % (slot, json.dumps(res, ensure_ascii=False)[:140]))
+                    _st0 = keeper_state(slot) or {}
                     hit_ledger(event="keeper", slot=slot, sku=sku,
                                state=(res or {}).get("state", "timeout"),
                                reason=(res or {}).get("reason", ""),
-                               result=str((res or {}).get("result", ""))[:60])
+                               result=str((res or {}).get("result", ""))[:60],
+                               parked_at=str(_st0.get("park_store") or "")[:8],
+                               posts_used=int(_st0.get("posts") or 0))
+                    # 動態停泊：無論這次下單成敗，都趁熱把該店停起來。
+                    # 只發命令、不改本次流程——keeper 下單後會自己重建再停泊。
+                    if os.environ.get("KEEPER_PARK_STORE", "0").strip() == "1" \
+                            and store_code:
+                        try:
+                            keeper_fire_park(slot, store_code, store)
+                        except Exception as _e:
+                            log("停泊命令失敗: " + repr(_e)[:60])
                     bark("iPhone 18 下單結果",
                          "%s %s" % (res.get("state", "?"),
                                     str(res.get("result", ""))[:60]), priority=1)
