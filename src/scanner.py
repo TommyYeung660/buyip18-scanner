@@ -828,8 +828,13 @@ def status_pusher():
                             ("@" + str(_st.get("park_store"))) if _st.get("park_store") else "")
                     _d = json.loads(body.decode("utf-8"))
                     _d["slots"] = _slots
+                    # 武裝狀態是 "ready"（keeper 的 _kwrite("ready")；scanner 的
+                    # 派工判斷也是查 state == "ready"）。先前誤寫成 "review"，
+                    # 結果 6/6 全武裝時卻報 slots_ready=0 —— 這種「健康卻顯示 0」
+                    # 的指標比沒有更危險，會讓人誤判艦隊停擺。
                     _d["slots_ready"] = sum(1 for v in _slots.values()
-                                            if v.startswith("review"))
+                                            if v.split("@")[0] == "ready")
+                    _d["slots_total"] = len(_slots)
                     body = json.dumps(_d, ensure_ascii=False).encode("utf-8")
                 except Exception:
                     pass
