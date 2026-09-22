@@ -188,6 +188,13 @@ jobs:
           # 所以 keeper 引擎（另 clone 的 buyip18-checkout）看得到。
           KEEPER_PARK_STORE: "1"
           KEEPER_PARK_SHADOW: "1"
+          # 導航鏈（9/22 實測，見 work/latency-repro/FINDINGS.md + nav_chain_cost.py）：
+          # checkoutx POST 的 10 秒節流是**伺服器端、以頁面檢視為單位**的閘，
+          # 而一次真正的文件載入會把它清零。∴ 命中鏈每一步改成「導航 + POST」，
+          # 每步約 0.9 秒 ⇒ 3-4 步鏈約 2.6-3.5 秒，直接落進 1-10 秒的庫存窗口，
+          # **不必先成功停泊**。這是目前唯一能讓「命中店≠停泊店」那 9 成命中
+          # 也有機會贏的改動。
+          KEEPER_NAV_CHAIN: "1"
           VNC_URL: ${{ env.VNC_URL }}
         run: |
           date +%s > /tmp/jobstart
