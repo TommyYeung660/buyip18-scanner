@@ -336,9 +336,26 @@ def keeper_start(nodes, slot):
         log("keeper%d 引擎複製失敗: %s" % (slot, repr(e)[:60]))
         return False
     state_p, cmd_p = keeper_paths(slot)
-    for f in (state_p, cmd_p):
+    try:
+        os.remove(state_p)
+    except Exception:
+        pass
+    # 命令檔不能無條件刪——**停泊命令正是要交給重建後的新 keeper 執行的**：
+    # 命中失敗時 keeper 會退出，而 keeper_fire_park() 是在 keeper_wait() 之後才
+    # 下命令，所以命令下達的當下該 slot 已經沒有 keeper 在讀。下一輪
+    # keeper_restart_dead() → keeper_start() 若把命令檔刪掉，停泊命令就永遠
+    # 沒有收件人（9/22 開影子模式前查出來的：整條停泊路徑會靜默空轉、零停泊）。
+    # 但 buy 命令**必須**刪：新 keeper 重播一個舊 buy ＝重複下單。
+    # 故只保留 park——它純推進結帳狀態、永不送 placeOrder，重播安全。
+    _keep_cmd = False
+    try:
+        with open(cmd_p, encoding="utf-8") as f:
+            _keep_cmd = (json.load(f) or {}).get("action") == "park"
+    except Exception:
+        _keep_cmd = False
+    if not _keep_cmd:
         try:
-            os.remove(f)
+            os.remove(cmd_p)
         except Exception:
             pass
     sku = KEEPER_FLEET[slot]
@@ -650,6 +667,17 @@ def main():
                     log("keeper%d 狀態=%s 不可用 — 走後備" % (slot, st.get("state")))
                     hit_ledger(event="keeper-skip", slot=slot, sku=sku,
                                state=st.get("state"))
+                else:
+                    # slot 有、但沒有狀態檔＝正在重建（keeper_start 會先刪狀態檔，
+                    # 新 keeper 走完建袋才寫 ready）。原本這條靜默落後備、不寫帳本
+                    # → 事後完全無法回答「這一發為何沒派到 keeper」（9/22 08:40
+                    # 那發就是這樣消失的：前一次失敗後 slot 重建中，命中撞上重建窗）。
+                    log("keeper%d 無狀態檔（重建中）— 走後備" % slot)
+                    hit_ledger(event="keeper-skip", slot=slot, sku=sku,
+                               state="rebuilding")
+            else:
+                log("keeper 艦隊未啟用 — 直接走後備鏈")
+                hit_ledger(event="keeper-skip", sku=sku, state="keeper-off")
             ran = False
             try:
                 ran = local_checkout(sku, store, nodes)
