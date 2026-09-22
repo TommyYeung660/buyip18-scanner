@@ -297,6 +297,44 @@ def keeper_wait(i, timeout_s):
     return last or {"state": "timeout"}
 
 
+def keeper_slots_view():
+    """回傳 (slots_dict, 武裝數)：latest.json 的 per-slot 可觀測性欄位。
+
+    每個 slot 的字串：
+      `-`              沒有狀態檔（重建中 / 剛被殺）
+      `ready`          武裝待命，沒有停泊
+      `ready@R409`     停泊在 R409（快路徑條件：命中 R409 時只剩 placeOrder）
+      `ready!R409/原因` 嘗試停泊 R409 但失敗 ← **一定要看得見**：停泊必然發生在
+                       keeper 重建之後，所以帳本上那一發命中的 park 欄位一定是空的；
+                       若失敗不留痕，「停泊失敗」與「從未嘗試」在 latest.json 上
+                       一模一樣，影子模式將無法歸因（9/22 第一發命中就是這樣）。
+
+    抽成獨立函式是為了可測：這段原本內嵌在 status_pusher 的 try/except 裡，
+    任何例外都會被吞掉、讓 latest.json 整個 slots 欄位消失＝靜默失去艦隊可觀測性。
+
+    永不拋出例外：任何單一 slot 讀不到就退化為 '-'，不影響其他 slot。
+    """
+    slots = {}
+    for i in range(len(KEEPER_FLEET)):
+        try:
+            st = keeper_state(i) or {}
+            sv = str(st.get("state") or "-")
+            if st.get("park_store"):
+                sv += "@" + str(st["park_store"])
+            elif st.get("park_try"):
+                sv += "!" + str(st["park_try"])
+                if st.get("park_fail"):
+                    sv += "/" + str(st["park_fail"])[:16]
+        except Exception:
+            sv = "-"
+        slots[str(i)] = sv
+    # 武裝判準與派工一致（KEEPER_ARMED）：先前誤寫成 "review"，結果 6/6 全武裝時
+    # 卻報 slots_ready=0 —— 這種「健康卻顯示 0」的指標比沒有更危險。
+    ready = sum(1 for v in slots.values()
+                if v.split("@")[0].split("!")[0] in KEEPER_ARMED)
+    return slots, ready
+
+
 def keeper_ready_count():
     n = 0
     for i in range(len(KEEPER_FLEET)):
@@ -856,19 +894,10 @@ def status_pusher():
                 # 而命中當下剛好有幾個 slot 在 review，才是決定成敗的量。
                 # 只加欄位、不改既有語義；失敗就照舊推送不阻斷。
                 try:
-                    _slots = {}
-                    for i in range(len(KEEPER_FLEET)):
-                        _st = keeper_state(i) or {}
-                        _slots[str(i)] = "%s%s" % (
-                            _st.get("state") or "-",
-                            ("@" + str(_st.get("park_store"))) if _st.get("park_store") else "")
+                    _slots, _ready = keeper_slots_view()
                     _d = json.loads(body.decode("utf-8"))
                     _d["slots"] = _slots
-                    # 武裝判準與派工一致（KEEPER_ARMED）：先前誤寫成 "review"，
-                    # 結果 6/6 全武裝時卻報 slots_ready=0 —— 這種「健康卻顯示 0」
-                    # 的指標比沒有更危險，會讓人誤判艦隊停擺。
-                    _d["slots_ready"] = sum(1 for v in _slots.values()
-                                            if v.split("@")[0] in KEEPER_ARMED)
+                    _d["slots_ready"] = _ready
                     _d["slots_total"] = len(_slots)
                     body = json.dumps(_d, ensure_ascii=False).encode("utf-8")
                 except Exception:
