@@ -193,6 +193,10 @@ KEEPER_BASE = "/tmp/keeper"                      # slot 目錄 /tmp/keeper/k{i}/
 KEEPER_ENGINE_BASE = "/tmp/checkout-engine"      # 基礎 clone（各 slot copytree 複製）
 FALLBACK_ENGINE_DIR = "/tmp/checkout-fallback"   # 命中重走的後備引擎（勿與 keeper 共用目錄）
 KEEPER_FLEET = list(PARTS)[:max(1, int(os.environ.get("KEEPER_SLOTS", "6") or 6))]
+# 「武裝待命」的狀態字串。keeper 端現在統一寫 "ready"（停泊資訊走 park_store
+# 正交欄位），這裡仍寬容接受 "parked"：狀態字串是跨檔案的契約，舊/新引擎混用
+# 時若漏認，slot 會靜默退出派工並被建袋看門狗殺掉重開——代價太大，不值得省這行。
+KEEPER_ARMED = ("ready", "parked")
 # per-slot 專屬出口（供應商無關）：SLOT_PROXIES_JSON 第 i 項 → slot i 專用 listener
 # 7892+i（scanner.yml 生成）；沒配到的 slot 或無 secret → 沿用免費 BUY 池 7891
 try:
@@ -280,7 +284,7 @@ def keeper_wait(i, timeout_s):
     while time.time() - t0 < timeout_s:
         last = keeper_state(i)
         if last and last.get("state") not in (
-                "ready", "buying", "selected", "keeper-swapping"):
+                KEEPER_ARMED + ("buying", "selected", "keeper-swapping")):
             return last
         if proc is not None and proc.poll() is not None:
             dead_polls += 1
@@ -298,7 +302,7 @@ def keeper_ready_count():
     for i in range(len(KEEPER_FLEET)):
         p = KEEPER_PROCS.get(i)
         if p is not None and p.poll() is None \
-                and (keeper_state(i) or {}).get("state") == "ready":
+                and (keeper_state(i) or {}).get("state") in KEEPER_ARMED:
             n += 1
     return n
 
@@ -390,7 +394,7 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
                 n += 1
             continue
         st = keeper_state(i)
-        if st and st.get("state") == "ready":
+        if st and st.get("state") in KEEPER_ARMED:
             continue                     # 已停泊待命=正常
         if age > build_deadline:
             log("keeper%d 建袋超時（%ds 未停泊）— 殺掉重開" % (i, int(age)))
@@ -587,7 +591,7 @@ def main():
                 # 不等預熱：slot 未就緒（狀態 None=建袋中/剛崩）即走本地引擎——
                 # 100 秒乾等只會把命中→下單拖成 160+ 秒（9/19 晨 #18/#19 敗因）；
                 # 命中落在 slot 推進期時命令檔會被停泊後 0.3 秒拾取，無需等
-                if slot is not None and st and st.get("state") == "ready":
+                if slot is not None and st and st.get("state") in KEEPER_ARMED:
                     keeper_fire(slot, sku, store, store_code)
                     res = keeper_wait(slot, 600)
                     log("keeper%d 結果: %s（其餘 slot 照常待命）"
@@ -598,7 +602,11 @@ def main():
                                reason=(res or {}).get("reason", ""),
                                result=str((res or {}).get("result", ""))[:60],
                                parked_at=str(_st0.get("park_store") or "")[:8],
-                               posts_used=int(_st0.get("posts") or 0))
+                               posts_used=int(_st0.get("posts") or 0),
+                               # 停泊存活性：命中店＝停泊店時選店後是否直達 review
+                               # （True＝停泊狀態在額度消失後仍活著）。影子模式的
+                               # 核心待驗前提，寫進帳本才有跨日證據。
+                               park_survived=_st0.get("park_survived"))
                     # 動態停泊：無論這次下單成敗，都趁熱把該店停起來。
                     # 只發命令、不改本次流程——keeper 下單後會自己重建再停泊。
                     if os.environ.get("KEEPER_PARK_STORE", "0").strip() == "1" \
@@ -828,12 +836,11 @@ def status_pusher():
                             ("@" + str(_st.get("park_store"))) if _st.get("park_store") else "")
                     _d = json.loads(body.decode("utf-8"))
                     _d["slots"] = _slots
-                    # 武裝狀態是 "ready"（keeper 的 _kwrite("ready")；scanner 的
-                    # 派工判斷也是查 state == "ready"）。先前誤寫成 "review"，
+                    # 武裝判準與派工一致（KEEPER_ARMED）：先前誤寫成 "review"，
                     # 結果 6/6 全武裝時卻報 slots_ready=0 —— 這種「健康卻顯示 0」
                     # 的指標比沒有更危險，會讓人誤判艦隊停擺。
                     _d["slots_ready"] = sum(1 for v in _slots.values()
-                                            if v.split("@")[0] == "ready")
+                                            if v.split("@")[0] in KEEPER_ARMED)
                     _d["slots_total"] = len(_slots)
                     body = json.dumps(_d, ensure_ascii=False).encode("utf-8")
                 except Exception:

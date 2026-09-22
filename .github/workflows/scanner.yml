@@ -179,6 +179,15 @@ jobs:
           PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
           PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
           PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
+          # 動態停泊階段 1（影子模式，9/22 用戶拍板開啟）：命中後叫該 slot 把停泊
+          # 狀態推進到「已選店＋contact＋billing 完成」，並記錄停泊成敗與存活證據。
+          # KEEPER_PARK_SHADOW=1 讓快路徑（單一 placeOrder）保持關閉＝**下單行為與
+          # 開啟前逐字相同**，零下單風險。刻意寫出 SHADOW=1 而不依賴程式預設值：
+          # 預設值一旦被改，這裡會靜默變成真正的下單路徑。
+          # 這兩個變數會被 keeper 子進程繼承（scanner.py 的 env=dict(os.environ,…)），
+          # 所以 keeper 引擎（另 clone 的 buyip18-checkout）看得到。
+          KEEPER_PARK_STORE: "1"
+          KEEPER_PARK_SHADOW: "1"
           VNC_URL: ${{ env.VNC_URL }}
         run: |
           date +%s > /tmp/jobstart
