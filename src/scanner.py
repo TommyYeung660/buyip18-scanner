@@ -445,7 +445,19 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
             if age <= cooldown:
                 continue
             log("keeper%d 進程已退（exit=%s）— 即時重開" % (i, proc.returncode))
-            if keeper_start(nodes, i):
+            # 帳本留痕：slot 死亡原本完全不入帳（帳本只記命中路徑事件），而
+            # in-progress run 的 log 讀不到 → 「為什麼這個 slot 沒被派到」「重建
+            # spell 從何而來」結構上答不出（9/23 08:47:31 slot4 那次「ready 一瞬
+            # 即逝」＝補位後又死一次，只能靠 latest.json 時間線猜）。終態檔多半
+            # 還在，把它的 state/reason 一起抄進來即可歸因。
+            _prev = keeper_state(i) or {}
+            _ok = keeper_start(nodes, i)
+            hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
+                       state="dead", exit=proc.returncode,
+                       prev=str(_prev.get("state") or ""),
+                       reason=str(_prev.get("reason") or "")[:70],
+                       up=int(age), restarted=bool(_ok))
+            if _ok:
                 n += 1
             continue
         st = keeper_state(i)
@@ -457,7 +469,12 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
                 proc.kill()
             except Exception:
                 pass
-            if keeper_start(nodes, i):
+            _ok = keeper_start(nodes, i)
+            hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
+                       state="build-timeout", prev=str((st or {}).get("state") or ""),
+                       reason=str((st or {}).get("reason") or "")[:70],
+                       up=int(age), restarted=bool(_ok))
+            if _ok:
                 n += 1
     return n
 
