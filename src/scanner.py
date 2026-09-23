@@ -812,7 +812,7 @@ def main():
                                # 導航鏈自證（checkout NAV_FACT）：nav＝導航次數、
                                # nav_skip＝沒導航的原因、nav_stk＝導航後 stk 有無換。
                                nav=_st0.get("nav"), nav_skip=str(_st0.get("nav_skip") or "")[:24],
-                               nav_stk=_st0.get("nav_stk"),
+                               nav_stk=_st0.get("nav_stk"), nav_ms=_st0.get("nav_ms"),
                                park_survived=_st0.get("park_survived"))
                     # 動態停泊：無論這次下單成敗，都趁熱把該店停起來。
                     # 只發命令、不改本次流程——keeper 下單後會自己重建再停泊。
