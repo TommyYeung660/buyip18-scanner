@@ -179,14 +179,21 @@ jobs:
           PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
           PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
           PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
-          # 動態停泊階段 1（影子模式，9/22 用戶拍板開啟）：命中後叫該 slot 把停泊
-          # 狀態推進到「已選店＋contact＋billing 完成」，並記錄停泊成敗與存活證據。
-          # KEEPER_PARK_SHADOW=1 讓快路徑（單一 placeOrder）保持關閉＝**下單行為與
-          # 開啟前逐字相同**，零下單風險。刻意寫出 SHADOW=1 而不依賴程式預設值：
+          # 動態停泊（階段 1 影子模式）**已於 9/23 關閉**——用戶裁決「收停泊」。
+          # 關閉理由是影子模式的核心前提已被真命中否證：9/23 08:29:52
+          # MJY04ZA/A @ Causeway Bay R409，slot4 的 `parked_at=R409`（停泊店＝命中店），
+          # 回報 `park_survived=false`，且逐步耗時 選店 1088ms／取貨聯絡人 10031ms／
+          # billing continue 10021ms——停泊期提交的 contact/billing 沒有活過額度消失，
+          # 命中時仍要走完整條鏈。∴ 停泊只付成本（每次佔掉 22-33 秒 POST 窗，且是紀錄中
+          # keeper「每小時一退」exit 43 的可疑來源）、不收報成。
+          # 只關 KEEPER_PARK_STORE（＝不再下令停泊、keeper 也不再處理停泊命令）；
+          # 程式碼保留，若日後要重驗前提 1 只需把這裡改回 "1"。
+          # KEEPER_PARK_SHADOW 仍必須是 "1"：它守住快路徑（單一 placeOrder）＝**下單
+          # 行為與開啟前逐字相同**，零下單風險。刻意寫出 SHADOW=1 而不依賴程式預設值：
           # 預設值一旦被改，這裡會靜默變成真正的下單路徑。
-          # 這兩個變數會被 keeper 子進程繼承（scanner.py 的 env=dict(os.environ,…)），
+          # 這些變數會被 keeper 子進程繼承（scanner.py 的 env=dict(os.environ,…)），
           # 所以 keeper 引擎（另 clone 的 buyip18-checkout）看得到。
-          KEEPER_PARK_STORE: "1"
+          KEEPER_PARK_STORE: "0"
           KEEPER_PARK_SHADOW: "1"
           # 導航鏈（9/22 實測，見 work/latency-repro/FINDINGS.md + nav_chain_cost.py）：
           # checkoutx POST 的 10 秒節流是**伺服器端、以頁面檢視為單位**的閘，
