@@ -460,29 +460,39 @@ def keeper_boot_break(i, age, prev, exit_code, short_life=300, base=120, cap=180
     ⛔ 安全閥：全隊 0 個武裝時一律只用 base（120 秒）持續試探——否則一次短暫
     的網路抖動會讓 6 個 slot 一起退避到 30 分鐘，反而比今天更難恢復。
     """
-    st = KEEPER_FAILS.setdefault(i, {"n": 0, "until": 0.0, "said": 0})
+    st = KEEPER_FAILS.setdefault(i, {"n": 0, "until": 0.0, "said": 0,
+                                     "life": None, "seen": 0.0})
     _r = str(prev.get("reason") or "")
     _worked = (_r.startswith(("http-buy", "buy-", "probe-exc", "sku-mismatch",
                               "advance-failed", "keepalive"))
                or bool(prev.get("buy_steps")))
-    if age >= short_life or _worked:
-        st["n"] = 0
-        st["until"] = 0.0
-        st["said"] = 0
+    # ⚠ 同一個死進程會被每一輪迴圈重新觀察到，而 age（＝now − 上次啟動）會一路變大。
+    # 9/23 晚的實作就是踩到這點：fails 每個 pass 都 +1（一路到 12）、直到 age 跨過
+    # short_life 才歸零重開 → 退避從來沒有指數成長（實際等於固定 ~5 分鐘），而且
+    # 每 ~10 秒噴一筆帳本（一夜 656 筆）。修法＝**記住這次死亡**：
+    # life 在「第一次看到它死」時定案，之後的 pass 不重複計數、也不再寫事件。
+    _first = st["life"] is None          # 這次死亡是不是第一次被看到
+    if _first:
+        st["life"] = age if age > 0 else 0
+        st["seen"] = time.time()
+    _life = st["life"]
+    if _life >= short_life or _worked:
+        st.update({"n": 0, "until": 0.0, "said": 0, "life": None})
         return False
-    st["n"] += 1
-    _wait = base if _fleet_armed() == 0 else min(base * 2 ** (st["n"] - 1), cap)
-    st["until"] = time.time() + _wait
-    if time.time() >= st["until"]:
-        return False
-    if st["said"] != st["n"]:
+    if _first:                                     # 只在第一次觀察時計數一次
+        st["n"] += 1
         st["said"] = st["n"]
-        log("keeper%d 連續 %d 次開機即死（exit=%s reason=%s）— 退避 %ds 後再試"
-            % (i, st["n"], exit_code, _r[:30] or "-", _wait))
+        _wait = base if _fleet_armed() == 0 else min(base * 2 ** (st["n"] - 1), cap)
+        st["until"] = st["seen"] + _wait
+        log("keeper%d 連續 %d 次開機即死（exit=%s 壽命 %ds reason=%s）— 退避 %ds 後再試"
+            % (i, st["n"], exit_code, int(_life), _r[:30] or "-", _wait))
         hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
                    state="backoff", exit=exit_code, prev=str(prev.get("state") or ""),
-                   reason=_r[:70], up=int(age), fails=st["n"],
+                   reason=_r[:70], up=int(_life), fails=st["n"],
                    backoff_s=_wait, restarted=False)
+    if time.time() >= st["until"]:
+        st["life"] = None          # 退避到期 → 放行重開，下次死亡重新起算
+        return False
     return True
 
 
@@ -509,6 +519,7 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
             # 即逝」＝補位後又死一次，只能靠 latest.json 時間線猜）。終態檔多半
             # 還在，把它的 state/reason 一起抄進來即可歸因。
             _ok = keeper_start(nodes, i)
+            KEEPER_FAILS.setdefault(i, {}).update({"life": None})
             hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
                        state="dead", exit=proc.returncode,
                        prev=str(_prev.get("state") or ""),
