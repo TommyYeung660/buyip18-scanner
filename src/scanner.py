@@ -716,6 +716,23 @@ def main():
             else:
                 log("keeper 艦隊未啟用 — 直接走後備鏈")
                 hit_ledger(event="keeper-skip", sku=sku, state="keeper-off")
+            # 補位即時化：命中用過 keeper 後它會自己退出，而下一輪的自癒
+            # （keeper_restart_dead，在主迴圈頂）要等整段本地後備跑完（~2-3 分）
+            # 才輪到 → 該 SKU 的 slot 每次命中後空缺 3-5 分鐘。9/22 08:03-08:14
+            # 實測：熱門 SKU 的 slot4 只有 50% 時間可用、該窗 30.9 次重建/小時；
+            # 08:07 那發更是直接撞上重建窗（keeper-skip rebuilding）白丟一發。
+            # 只補真的死掉的進程（活著在建袋的不動）；keeper_start 保留 park 命令、
+            # 刪 buy 命令，所以「趁熱停泊」也一併提早約 2 分鐘執行。
+            if keeper_on and slot is not None:
+                _p = KEEPER_PROCS.get(slot)
+                if _p is not None and _p.poll() is None:
+                    for _ in range(10):      # 最多等 5 秒讓 keeper 寫完終態自己收工
+                        if _p.poll() is not None:
+                            break
+                        time.sleep(0.5)
+                if _p is None or _p.poll() is not None:
+                    log("keeper%d 失敗後即時補位（不等下一輪自癒）" % slot)
+                    keeper_start(nodes, slot)
             ran = False
             try:
                 ran = local_checkout(sku, store, nodes)
