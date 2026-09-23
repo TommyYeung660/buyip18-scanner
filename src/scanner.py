@@ -431,6 +431,61 @@ def keeper_start_all(nodes):
     return ok
 
 
+KEEPER_FAILS = {}   # slot -> {"n": 連續開機即死次數, "until": 退避到期, "said": 已記錄到第幾次}
+
+
+def _fleet_armed():
+    """目前武裝中的 slot 數（斷路器安全閥用）。"""
+    n = 0
+    for j in range(len(KEEPER_FLEET)):
+        p = KEEPER_PROCS.get(j)
+        if p is None or p.poll() is not None:
+            continue
+        if (keeper_state(j) or {}).get("state") in KEEPER_ARMED:
+            n += 1
+    return n
+
+
+def keeper_boot_break(i, age, prev, exit_code, short_life=300, base=120, cap=1800):
+    """開機即死的斷路器：回傳 True＝正在退避、這一輪不要重開。
+
+    為什麼（9/23 16:00 實證）：slot 0 的出口連商品頁都載不到
+    （`Page.goto: net::ERR_CONNECTION_CLOSED`），它以 ~2 分鐘為週期無限重開
+    （存活中位數 122-134 秒、3.5 小時 28 次死亡／22 次 recycle），卻永遠武裝
+    不起來——持續燒 runner 資源與出口連線，整隊陪它一起耗。
+
+    判準：存活 < short_life（300 秒）＝**從未武裝就死**；但「已做過事」的死
+    不算（買入失敗／會話快驗失敗／sku 不符等都代表它武裝過）——那些要立刻重開。
+    退避＝base × 2^(n-1)，上限 cap。活過 short_life 即歸零。
+    ⛔ 安全閥：全隊 0 個武裝時一律只用 base（120 秒）持續試探——否則一次短暫
+    的網路抖動會讓 6 個 slot 一起退避到 30 分鐘，反而比今天更難恢復。
+    """
+    st = KEEPER_FAILS.setdefault(i, {"n": 0, "until": 0.0, "said": 0})
+    _r = str(prev.get("reason") or "")
+    _worked = (_r.startswith(("http-buy", "buy-", "probe-exc", "sku-mismatch",
+                              "advance-failed", "keepalive"))
+               or bool(prev.get("buy_steps")))
+    if age >= short_life or _worked:
+        st["n"] = 0
+        st["until"] = 0.0
+        st["said"] = 0
+        return False
+    st["n"] += 1
+    _wait = base if _fleet_armed() == 0 else min(base * 2 ** (st["n"] - 1), cap)
+    st["until"] = time.time() + _wait
+    if time.time() >= st["until"]:
+        return False
+    if st["said"] != st["n"]:
+        st["said"] = st["n"]
+        log("keeper%d 連續 %d 次開機即死（exit=%s reason=%s）— 退避 %ds 後再試"
+            % (i, st["n"], exit_code, _r[:30] or "-", _wait))
+        hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
+                   state="backoff", exit=exit_code, prev=str(prev.get("state") or ""),
+                   reason=_r[:70], up=int(age), fails=st["n"],
+                   backoff_s=_wait, restarted=False)
+    return True
+
+
 def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
     """逐 slot 自癒：①進程死（過冷卻）→ 重開 ②進程活但卡住（建袋超 7 分未停泊，
     如 Playwright wedge）→ 殺掉重開。9/19 首次艦隊實證：2 個 slot 卡在建袋期
@@ -442,6 +497,9 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
             continue
         age = time.time() - KEEPER_LASTSTART.get(i, 0)
         if proc.poll() is not None:
+            _prev = keeper_state(i) or {}
+            if keeper_boot_break(i, age, _prev, proc.returncode):
+                continue                 # 開機即死 → 退避中（見 keeper_boot_break）
             if age <= cooldown:
                 continue
             log("keeper%d 進程已退（exit=%s）— 即時重開" % (i, proc.returncode))
@@ -450,13 +508,13 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
             # spell 從何而來」結構上答不出（9/23 08:47:31 slot4 那次「ready 一瞬
             # 即逝」＝補位後又死一次，只能靠 latest.json 時間線猜）。終態檔多半
             # 還在，把它的 state/reason 一起抄進來即可歸因。
-            _prev = keeper_state(i) or {}
             _ok = keeper_start(nodes, i)
             hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
                        state="dead", exit=proc.returncode,
                        prev=str(_prev.get("state") or ""),
                        reason=str(_prev.get("reason") or "")[:70],
-                       up=int(age), restarted=bool(_ok))
+                       up=int(age), fails=KEEPER_FAILS.get(i, {}).get("n", 0),
+                       restarted=bool(_ok))
             if _ok:
                 n += 1
             continue
