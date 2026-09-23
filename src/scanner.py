@@ -658,9 +658,10 @@ def main():
                                result=str((res or {}).get("result", ""))[:60],
                                parked_at=str(_st0.get("park_store") or "")[:8],
                                posts_used=int(_st0.get("posts") or 0),
-                               # 停泊存活性：命中店＝停泊店時選店後是否直達 review
-                               # （True＝停泊狀態在額度消失後仍活著）。影子模式的
-                               # 核心待驗前提，寫進帳本才有跨日證據。
+                               # 本次買入的逐步耗時（checkout BUY_TRACE）——命中鏈驗收的
+                               # 核心數字。latest.json 是滾動快照、in-progress log 讀不到，
+                               # 只有抄進 append-only 帳本才永久可查。
+                               buy_steps=str(_st0.get("buy_steps") or "")[:240],
                                park_survived=_st0.get("park_survived"))
                     # 動態停泊：無論這次下單成敗，都趁熱把該店停起來。
                     # 只發命令、不改本次流程——keeper 下單後會自己重建再停泊。
