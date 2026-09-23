@@ -733,7 +733,11 @@ def main():
                         time.sleep(0.5)
                 if _p is None or _p.poll() is not None:
                     log("keeper%d 失敗後即時補位（不等下一輪自癒）" % slot)
-                    keeper_start(nodes, slot)
+                    # 帳本留痕：否則「補位有沒有真的提早發生」只能靠事後比對
+                    # latest.json 的 slot 時間線反推（9/23 08:45 那發就是這樣驗的）。
+                    hit_ledger(event="relay", slot=slot, sku=sku,
+                               state="restarted" if keeper_start(nodes, slot)
+                               else "restart-failed")
             ran = False
             try:
                 ran = local_checkout(sku, store, nodes)
