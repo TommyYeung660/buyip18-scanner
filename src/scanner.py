@@ -479,6 +479,63 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
     return n
 
 
+def keeper_recycle_old(nodes, max_age_s):
+    """主動錯開回收：在會話失明前，把太老的 keeper 逐一退掉重建。
+
+    為什麼需要（9/23 實測）：keeper 的會話在齡滿 ~25 分鐘後失明——保活連續 3 次
+    例外即自曝退出（exit 43）。證據是兩個死亡波次的年齡幾乎相同（1448-1535 秒），
+    而第二波那批 process 是 09:42-09:46 才啟動的：若是「某個 wall-clock 外部事件」，
+    它們應該在不同年齡死。被動等它自己死＝整隊同刻全滅（實測 5 個 slot 在 4 分鐘內
+    一起死、可用率掉到 2/6，還有一發命中撞上已失明的會話、鏈一步都沒跑）。
+    主動回收把「同刻全滅」換成「一次一個」。
+
+    ⛔ 安全閘（任一不成立就整輪不動）：
+      - 有任何 slot 在 `buying`（placeOrder 可能在途）→ 絕不動
+      - 有任何 slot 進程已死／沒狀態檔（＝正在重建）→ 交給 keeper_restart_dead
+      - 武裝中的 slot < `ARMED_MIN`（5）→ 艦隊已在劣化，先處理真正的故障
+    最後一條同時是天然的錯開機制：回收一個後武裝數掉到 4，要等它重新武裝才會
+    再回收下一個（實測重建 2-4 分鐘 ⇒ 自然形成 2-4 分鐘間隔）。
+    ⚠ 刻意用 5 而非 6：全窗 6/6 只佔 24.4%（5/6 佔 33.6%），要求 6/6 等於放棄
+    大部分窗口、錯開回收會幾乎跑不動。代價是「已有 1 個在開機時再回收 1 個」＝
+    短暫 2 個空缺；相對於被動等 5 個 slot 同刻全滅（實測 5 分鐘內掉到 2/6、
+    還有命中撞上已失明會話），這個代價可以接受。
+    回傳實際回收數。
+    """
+    if max_age_s <= 0:
+        return 0
+    ARMED_MIN = 5
+    armed = 0
+    for j in range(len(KEEPER_FLEET)):
+        p = KEEPER_PROCS.get(j)
+        if p is None or p.poll() is not None:
+            return 0                      # 有 slot 掛了／正在重建 → 不主動回收
+        s = (keeper_state(j) or {}).get("state")
+        if s == "buying":
+            return 0                      # placeOrder 可能在途 → 絕不動
+        if s in KEEPER_ARMED:
+            armed += 1
+    if armed < ARMED_MIN:
+        return 0
+    # 從最老的開始，一次只回收一個
+    cands = [j for j in range(len(KEEPER_FLEET))]
+    cands.sort(key=lambda j: KEEPER_LASTSTART.get(j, 0))
+    for i in cands:
+        age = time.time() - KEEPER_LASTSTART.get(i, 0)
+        if age < max_age_s:
+            continue
+        log("keeper%d 齡 %.1f 分 ≥ 上限 %.1f 分 — 主動回收（趁會話還活著）"
+            % (i, age / 60.0, max_age_s / 60.0))
+        try:
+            KEEPER_PROCS[i].kill()
+        except Exception:
+            pass
+        _ok = keeper_start(nodes, i)
+        hit_ledger(event="keeper-recycle", slot=i, sku=KEEPER_FLEET[i],
+                   up=int(age), restarted=bool(_ok))
+        return 1 if _ok else 0
+    return 0
+
+
 def local_checkout(sku, store, nodes):
     """命中後免等新 runner：本 job 就地跑結帳引擎（家寬出口 7891，mihomo BUY 組釘死）。
     回傳 True=引擎已實際執行（不論成交與否，不再重複派工）；False=環境不備，交回派工路徑。"""
@@ -614,6 +671,10 @@ def main():
         # keeper 艦隊自癒：逐 slot 檢查死亡進程（冷卻 120s）即時重開
         if keeper_on:
             keeper_restart_dead(nodes)
+            # 主動錯開回收（KEEPER_RECYCLE_S，0=關）。會話齡滿 ~25 分鐘就失明
+            # （9/23 兩波死亡年齡都 1448-1535 秒＝年齡觸發），被動等它自己死會
+            # 讓整隊同刻重建；這裡在失明前逐個退掉，天然錯開。
+            keeper_recycle_old(nodes, int(os.environ.get("KEEPER_RECYCLE_S", "0")))
         try:
             hits = sweep_once(nodes)
         except RuntimeError as e:
