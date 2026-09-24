@@ -41,6 +41,13 @@ START = time.time()
 node_last_used = {}
 node_dead = {}                      # name → 冷卻截止 unix-ts（過期即復活）
 node_strikes = {}                   # name → 累計失敗次數（三振出局）
+# 掃描心跳：每 HB_S 秒往帳本寫一列「這一輪掃了幾個節點、幾個已冷卻、命中幾個」。
+# 為什麼需要：9/25 整窗 0 命中時，帳本裡**沒有任何掃描器健康的訊號**（哨兵通道自
+# 9/22 起靜止），分不出「真沒貨」與「偵測壞了」——而後者是會靜默賠掉命中的失效模式。
+# 放帳本而不是 status/latest.json：後者是「內容有變才推」，加一個每次掃描都變的
+# 欄位會變成每 2-3 秒推一次、打爆 GitHub API；帳本 15 分鐘一列＝4 列/小時。
+HB_S = int(os.environ.get("SCANNER_HB_S", "900"))
+_hb_last = [0.0]
 
 
 def mask(name):
@@ -791,6 +798,17 @@ def main():
             keeper_recycle_old(nodes, int(os.environ.get("KEEPER_RECYCLE_S", "0")))
         try:
             hits = sweep_once(nodes)
+            if time.time() - _hb_last[0] > HB_S:
+                _hb_last[0] = time.time()
+                hit_ledger(event="sweep", nodes_total=len(nodes),
+                           nodes_dead=sum(1 for n in nodes
+                                          if node_dead.get(n, 0) > time.time()),
+                           nodes_strike=sum(1 for n in nodes if node_strikes.get(n)),
+                           hits_in_round=len(hits), cur_node=mask(_cur_node) if _cur_node else "")
+                try:
+                    push_hits_ledger()      # 心跳要即時可見，不等命中
+                except Exception:
+                    pass
         except RuntimeError as e:
             log("全部節點失效，10 分鐘後重試: %s" % e)
             node_dead.clear()  # 清冷卻讓節點復活（三振次數保留）
