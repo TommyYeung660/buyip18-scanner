@@ -432,6 +432,10 @@ def keeper_start_all(nodes):
 
 
 KEEPER_FAILS = {}   # slot -> {"n": 連續開機即死次數, "until": 退避到期, "said": 已記錄到第幾次}
+# 在途的「原地換 session」刷新命令：slot -> 發出時刻。看門狗＝超過
+# REFRESH_TIMEOUT_S 仍未回武裝 ⇒ 退回「殺掉重建」（keeper 生命週期外的保險）。
+KEEPER_REFRESH_SENT = {}
+REFRESH_TIMEOUT_S = 180
 
 
 def _fleet_armed():
@@ -585,23 +589,52 @@ def keeper_recycle_old(nodes, max_age_s):
             armed += 1
     if armed < ARMED_MIN:
         return 0
-    # 從最老的開始，一次只回收一個
-    cands = [j for j in range(len(KEEPER_FLEET))]
-    cands.sort(key=lambda j: KEEPER_LASTSTART.get(j, 0))
+    now = time.time()
+    for j in list(KEEPER_REFRESH_SENT):          # 刷新成功的清掉在途記錄
+        if (keeper_state(j) or {}).get("state") in KEEPER_ARMED:
+            KEEPER_REFRESH_SENT.pop(j, None)
+    cands = sorted(range(len(KEEPER_FLEET)),
+                   key=lambda j: KEEPER_LASTSTART.get(j, 0))
     for i in cands:
-        age = time.time() - KEEPER_LASTSTART.get(i, 0)
+        age = now - KEEPER_LASTSTART.get(i, 0)
         if age < max_age_s:
             continue
-        log("keeper%d 齡 %.1f 分 ≥ 上限 %.1f 分 — 主動回收（趁會話還活著）"
-            % (i, age / 60.0, max_age_s / 60.0))
+        _sent = KEEPER_REFRESH_SENT.get(i)
+        if _sent and now - _sent <= REFRESH_TIMEOUT_S:
+            return 0                     # 命令已發，等它完成（看門狗下一輪再看）
+        # ⚡ 原地換 session（9/24，用戶批准）：Apple 的 guest 結帳會話有 ~20.3 分鐘
+        # 伺服器端 TTL（本機實測；過期時 Apple 把頁面導去 /sorry/session_expired），
+        # 保活無法延長。原本這裡是「殺進程 + 重建」＝2-4 分鐘空窗，而每次命中
+        # 都可能落在那段空窗（9/24 08:40 那發就是被它吃掉）；改成發 refresh 命令，
+        # 讓 keeper 在同一進程內清 session 重新武裝（~20-40 秒）。
+        # 看門狗：超過 REFRESH_TIMEOUT_S 仍未武裝 ⇒ 退回殺掉重建（保險）。
+        if _sent:
+            log("keeper%d 原地換 session 超時（%.0fs）— 退回殺掉重建"
+                % (i, now - _sent))
+            KEEPER_REFRESH_SENT.pop(i, None)
+            try:
+                KEEPER_PROCS[i].kill()
+            except Exception:
+                pass
+            _ok = keeper_start(nodes, i)
+            hit_ledger(event="keeper-recycle", slot=i, sku=KEEPER_FLEET[i],
+                       up=int(age), state="refresh-timeout", restarted=bool(_ok))
+            return 1 if _ok else 0
+        if KEEPER_REFRESH_SENT:
+            return 0                     # 一次只讓一個 slot 換 session
         try:
-            KEEPER_PROCS[i].kill()
-        except Exception:
-            pass
-        _ok = keeper_start(nodes, i)
+            _, cmd_p = keeper_paths(i)
+            json.dump({"action": "refresh", "reason": "age %.0f min" % (age / 60.0)},
+                      open(cmd_p, "w"), ensure_ascii=False)
+        except Exception as e:
+            log("keeper%d 刷新命令寫入失敗：%s — 退回殺掉重建" % (i, repr(e)[:50]))
+            continue
+        KEEPER_REFRESH_SENT[i] = now
+        log("keeper%d 齡 %.1f 分 ≥ 上限 %.1f 分 — 發自我刷新命令（原地換 session）"
+            % (i, age / 60.0, max_age_s / 60.0))
         hit_ledger(event="keeper-recycle", slot=i, sku=KEEPER_FLEET[i],
-                   up=int(age), restarted=bool(_ok))
-        return 1 if _ok else 0
+                   up=int(age), state="refresh-sent", restarted=False)
+        return 0
     return 0
 
 
