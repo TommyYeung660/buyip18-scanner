@@ -562,32 +562,17 @@ def keeper_recycle_old(nodes, max_age_s):
     一起死、可用率掉到 2/6，還有一發命中撞上已失明的會話、鏈一步都沒跑）。
     主動回收把「同刻全滅」換成「一次一個」。
 
-    ⛔ 安全閘（任一不成立就整輪不動）：
-      - 有任何 slot 在 `buying`（placeOrder 可能在途）→ 絕不動
-      - 有任何 slot 進程已死／沒狀態檔（＝正在重建）→ 交給 keeper_restart_dead
-      - 武裝中的 slot < `ARMED_MIN`（5）→ 艦隊已在劣化，先處理真正的故障
-    最後一條同時是天然的錯開機制：回收一個後武裝數掉到 4，要等它重新武裝才會
-    再回收下一個（實測重建 2-4 分鐘 ⇒ 自然形成 2-4 分鐘間隔）。
-    ⚠ 刻意用 5 而非 6：全窗 6/6 只佔 24.4%（5/6 佔 33.6%），要求 6/6 等於放棄
-    大部分窗口、錯開回收會幾乎跑不動。代價是「已有 1 個在開機時再回收 1 個」＝
-    短暫 2 個空缺；相對於被動等 5 個 slot 同刻全滅（實測 5 分鐘內掉到 2/6、
-    還有命中撞上已失明會話），這個代價可以接受。
+    ⛔ 安全閘（**逐 slot** 判斷，任一不成立就跳過該 slot）：
+      - 該 slot 在 `buying`（placeOrder 可能在途）→ 絕不動
+      - 該 slot 進程已死 → 交給 keeper_boot_break／keeper_restart_dead
+      - 該 slot 未武裝（建袋中／已失效）→ 沒東西可換
+    另加「最多 2 個 refresh 在途」的節制（避免同時大量重填袋）。
+    ⚠ 9/25 修正：這三條原本是**艦隊級**（任何 slot 死了／武裝 <5 就整輪不動），
+    結果 refresh 被延到齡 1193-1544 秒才發、**已超過會話 20.3 分鐘 TTL**，
+    必然失敗（refresh-exhausted → exit 43 → 重建）＝機制白做。
     回傳實際回收數。
     """
     if max_age_s <= 0:
-        return 0
-    ARMED_MIN = 5
-    armed = 0
-    for j in range(len(KEEPER_FLEET)):
-        p = KEEPER_PROCS.get(j)
-        if p is None or p.poll() is not None:
-            return 0                      # 有 slot 掛了／正在重建 → 不主動回收
-        s = (keeper_state(j) or {}).get("state")
-        if s == "buying":
-            return 0                      # placeOrder 可能在途 → 絕不動
-        if s in KEEPER_ARMED:
-            armed += 1
-    if armed < ARMED_MIN:
         return 0
     now = time.time()
     for j in list(KEEPER_REFRESH_SENT):          # 刷新成功的清掉在途記錄
@@ -595,19 +580,23 @@ def keeper_recycle_old(nodes, max_age_s):
             KEEPER_REFRESH_SENT.pop(j, None)
     cands = sorted(range(len(KEEPER_FLEET)),
                    key=lambda j: KEEPER_LASTSTART.get(j, 0))
+    # ⚠ 9/25 實證修正：原本這裡是**艦隊級**閘（任何 slot 進程死了、或武裝數 <5、
+    # 或有 slot 在 buying 就整輪不動），結果 refresh 命令被延到齡 1193-1544 秒
+    # 才發——**已超過會話的 20.3 分鐘 TTL**，於是 refresh 必然失敗
+    # （refresh-exhausted → exit 43 → 重建），整套機制白做。
+    # 改成**逐 slot**判斷：只看該 slot 自己（進程死／未武裝／在 buying 就跳過），
+    # 不再被其他 slot 的狀態拖累；只保留「最多 2 個 refresh 在途」的節制。
+    _in_flight = len(KEEPER_REFRESH_SENT)
     for i in cands:
         age = now - KEEPER_LASTSTART.get(i, 0)
         if age < max_age_s:
             continue
+        # ⛔ 在途檢查必須排在「未武裝就跳過」**之前**：refresh 進行中的 slot 正是
+        # 未武裝（狀態 refreshing），若先跳過它，看門狗（超時 → 殺掉重建）永遠
+        # 到不了 ⇒ 卡住的 slot 只能等 keeper_restart_dead 的 420 秒建袋看門狗才被救。
         _sent = KEEPER_REFRESH_SENT.get(i)
         if _sent and now - _sent <= REFRESH_TIMEOUT_S:
             return 0                     # 命令已發，等它完成（看門狗下一輪再看）
-        # ⚡ 原地換 session（9/24，用戶批准）：Apple 的 guest 結帳會話有 ~20.3 分鐘
-        # 伺服器端 TTL（本機實測；過期時 Apple 把頁面導去 /sorry/session_expired），
-        # 保活無法延長。原本這裡是「殺進程 + 重建」＝2-4 分鐘空窗，而每次命中
-        # 都可能落在那段空窗（9/24 08:40 那發就是被它吃掉）；改成發 refresh 命令，
-        # 讓 keeper 在同一進程內清 session 重新武裝（~20-40 秒）。
-        # 看門狗：超過 REFRESH_TIMEOUT_S 仍未武裝 ⇒ 退回殺掉重建（保險）。
         if _sent:
             log("keeper%d 原地換 session 超時（%.0fs）— 退回殺掉重建"
                 % (i, now - _sent))
@@ -620,8 +609,22 @@ def keeper_recycle_old(nodes, max_age_s):
             hit_ledger(event="keeper-recycle", slot=i, sku=KEEPER_FLEET[i],
                        up=int(age), state="refresh-timeout", restarted=bool(_ok))
             return 1 if _ok else 0
-        if KEEPER_REFRESH_SENT:
-            return 0                     # 一次只讓一個 slot 換 session
+        p_i = KEEPER_PROCS.get(i)
+        if p_i is None or p_i.poll() is not None:
+            continue                      # 該 slot 進程已死 → 交自癒（keeper_boot_break）
+        s_i = (keeper_state(i) or {}).get("state")
+        if s_i == "buying":
+            continue                      # 該 slot 的 placeOrder 可能在途 → 絕不動
+        if s_i not in KEEPER_ARMED:
+            continue                      # 該 slot 未武裝（建袋中／已失效）→ 沒東西可換
+        # ⚡ 原地換 session（9/24，用戶批准）：Apple 的 guest 結帳會話有 ~20.3 分鐘
+        # 伺服器端 TTL（本機實測；過期時 Apple 把頁面導去 /sorry/session_expired），
+        # 保活無法延長。原本這裡是「殺進程 + 重建」＝2-4 分鐘空窗，而每次命中
+        # 都可能落在那段空窗（9/24 08:40 那發就是被它吃掉）；改成發 refresh 命令，
+        # 讓 keeper 在同一進程內清 session 重新武裝（~20-40 秒）。
+        # 看門狗：超過 REFRESH_TIMEOUT_S 仍未武裝 ⇒ 退回殺掉重建（保險）。
+        if _in_flight >= 2:
+            return 0                     # 最多 2 個 refresh 在途（避免同時大量重填袋）
         try:
             _, cmd_p = keeper_paths(i)
             json.dump({"action": "refresh", "reason": "age %.0f min" % (age / 60.0)},
