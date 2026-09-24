@@ -536,6 +536,15 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
         st = keeper_state(i)
         if st and st.get("state") in KEEPER_ARMED:
             continue                     # 已停泊待命=正常
+        # ⛔ 9/25 實證：正在**原地換 session** 的 slot 不可被建袋看門狗殺掉。
+        # 這裡比的是 age＝「進程年齡」，而 refresh 是**同一個進程**的工作——那個
+        # 進程必然已活 >build_deadline（keeper 待命 18 分鐘才換 session），
+        # 所以它會被誤判成「建袋卡住」而殺掉：帳本實測 refresh 後 10-17 秒就
+        # `state=build-timeout, prev='refreshing'`，換 session 永遠做不完，
+        # 而且每 1-2 分鐘賠一個 slot 的重建（fleet 掉到 4/6）。
+        # 它由主動回收的看門狗（REFRESH_TIMEOUT_S=180 秒 → 殺掉重建）負責。
+        if i in KEEPER_REFRESH_SENT:
+            continue
         if age > build_deadline:
             log("keeper%d 建袋超時（%ds 未停泊）— 殺掉重開" % (i, int(age)))
             try:
