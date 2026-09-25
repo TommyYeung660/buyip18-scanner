@@ -241,6 +241,73 @@ def main():
             bag=n, url=page.url[:120], ua=os.environ.get("UA_ARM", "safari"),
             guest_clicks=_guest_clicks)
 
+        # ---- MODE=navmap：導航目標 A/B（同一支生產 keeper_buy_http，只換 NAV_SELF_PAGES）----
+        # 提示詞的判讀表：命中後「選店快、其後每步 ≈10 秒」⇒ 該步的頁面映射猜錯。
+        # 9/25 生產三發正是此形狀（選店 547/720ms，其後 7.5-9.3 秒），且 nav 後 stk 沒換。
+        # 這裡把「取貨聯絡人」那一步的導航目標逐一換掉，看哪個目標能讓該步變快。
+        if os.environ.get("MODE") == "navmap":
+            import copy
+            base = dict(getattr(C, "NAV_SELF_PAGES", {}))
+            log("原始 NAV_SELF_PAGES=" + json.dumps(base, ensure_ascii=False))
+            TARGETS = [("Fulfillment-init", "Fulfillment-init"),
+                       ("Shipping-init(現行)", "Shipping-init"),
+                       ("Billing-init", "Billing-init"),
+                       ("不導航(對照)", "")]
+            for label, tgt in TARGETS:
+                # 每個目標都要**全新的會話**（鏈會推進狀態，同一會話測不了第二個目標）
+                try:
+                    page.goto(C.PRODUCT_URL, wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(1200)
+                    for _t in range(5):
+                        if C.add_to_bag(page, ctx, CAND_OK := ["6.9", "布根地紅色", "256GB"]):
+                            break
+                        time.sleep(6)
+                    page.goto(f"{C.SHOP}/bag", wait_until="domcontentloaded", timeout=45000)
+                    page.wait_for_timeout(2000)
+                    _entry()
+                    for _i in range(18):
+                        page.wait_for_timeout(1500)
+                        if "Fulfillment" in (page.url or ""):
+                            break
+                        if C.click_text(page, ["以訪客身份繼續", "繼續以訪客身份結帳",
+                                               "Continue as Guest"]):
+                            page.wait_for_timeout(1500)
+                            if "Fulfillment" in (page.url or ""):
+                                break
+                    if "Fulfillment" not in (page.url or ""):
+                        log("  臂 %s：建會話失敗（%s）" % (label, page.url[:60]))
+                        rec(phase="navmap", arm=label, target=tgt, ok=False, why="no-session")
+                        continue
+                except Exception as e:
+                    log("  臂 %s：建會話例外 %r" % (label, e))
+                    rec(phase="navmap", arm=label, target=tgt, ok=False, why=repr(e)[:60])
+                    continue
+                m = dict(base)
+                m["contact"] = tgt          # 只換「取貨聯絡人」那一步的目標
+                C.NAV_SELF_PAGES = m
+                C.BUY_TRACE.clear()
+                C.NAV_FACT.update({"n": 0, "stk_changed": False, "skip": "",
+                                   "next_seen": "", "ms": 0})
+                _h = (page.url or "").split("/")[2]
+                log("--- 臂 %s：NAV_SELF_PAGES['contact']=%r" % (label, tgt))
+                try:
+                    res = C.keeper_buy_http(page, {"host": _h, "stk": stk(page), "mode": "B"},
+                                            STORE, {"name": "p", "email": "probe@example.com",
+                                                    "phone": "51234567", "first_name": "P",
+                                                    "last_name": "T"})
+                except Exception as e:
+                    res = "EXC:%r" % (e,)
+                log("    結果=%r steps=%s nav n=%s stk_changed=%s"
+                    % (res, ";".join(C.BUY_TRACE), C.NAV_FACT.get("n"),
+                       C.NAV_FACT.get("stk_changed")))
+                rec(phase="navmap", arm=label, target=tgt, ok=True, result=str(res),
+                    buy_steps=";".join(C.BUY_TRACE), nav=C.NAV_FACT.get("n"),
+                    nav_stk=C.NAV_FACT.get("stk_changed"), nav_ms=C.NAV_FACT.get("ms"))
+                time.sleep(3)
+            C.NAV_SELF_PAGES = base
+            br.close()
+            return
+
         # ---- MODE=chain：直接呼叫**生產的** keeper_buy_http（真字串、真步驟）----
         # 為什麼不自己組 POST：9/25 自組的 qs 全部回 403，量到的是拒絕路徑而非節流
         # 路徑，等於沒量到閘。生產函式自帶 _buy_step → BUY_TRACE 會給逐步 ms，
