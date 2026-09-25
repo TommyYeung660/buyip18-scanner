@@ -441,6 +441,10 @@ KEEPER_FAILS = {}   # slot -> {"n": 連續開機即死次數, "until": 退避到
 # 在途的「原地換 session」刷新命令：slot -> 發出時刻。看門狗＝超過
 # REFRESH_TIMEOUT_S 仍未回武裝 ⇒ 退回「殺掉重建」（keeper 生命週期外的保險）。
 KEEPER_REFRESH_SENT = {}
+# 每 slot 的 refresh 命令序號（只增不減）。keeper 只認比它上次消費過的更大的序號，
+# 重複／過期的命令一律吃掉忽略 ⇒ 結構上不可能再用同一則命令把 keeper 推進
+# 「下一輪換 session」而 exit 43（整夜 31 次 refresh-exhausted 的機制）。
+KEEPER_REFRESH_N = {}
 REFRESH_TIMEOUT_S = 180
 # 原地換 session 成功的時刻（slot -> ts）。⛔ 9/25 實證明確：refresh 是**同一個進程**
 # 的工作，不會更新 KEEPER_LASTSTART ⇒ 若不另外記「最近一次換 session」，slot 的齡
@@ -528,8 +532,23 @@ def _keeper_log_tail(i, lines=6, width=420):
             tail = f.read()[-4000:]
         out = " | ".join([l for l in tail.strip().splitlines()[-lines:]])
         return out[-width:]
-    except Exception:
-        return ""
+    except Exception as e:
+        # 9/26 實證：log_tail 一直是空字串 ⇒ 無法歸因 refresh-exhausted。原本這裡
+        # 靜默回 ""，分不出「檔案不在」與「讀不到」。改成回報原因並用 glob 後備
+        # （KEEPER_BASE 的推導若與 keeper_start 不一致，glob 仍找得到）。
+        try:
+            import glob as _g
+            cands = sorted(_g.glob(os.path.join(
+                os.path.dirname(_kslot_dir(i)), "k*", "keeper.log")),
+                key=os.path.getmtime)
+            if cands:
+                with open(cands[-1], "r", encoding="utf-8", errors="replace") as f:
+                    t2 = f.read()[-4000:]
+                return ("[glob:%s] " % os.path.basename(os.path.dirname(cands[-1]))
+                        + " | ".join(t2.strip().splitlines()[-lines:]))[-width:]
+        except Exception:
+            pass
+        return "ERR:" + repr(e)[:60]
 
 
 def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
@@ -675,7 +694,9 @@ def keeper_recycle_old(nodes, max_age_s):
             return 0                     # 最多 2 個 refresh 在途（避免同時大量重填袋）
         try:
             _, cmd_p = keeper_paths(i)
-            json.dump({"action": "refresh", "reason": "age %.0f min" % (age / 60.0)},
+            KEEPER_REFRESH_N[i] = KEEPER_REFRESH_N.get(i, 0) + 1
+            json.dump({"action": "refresh", "n": KEEPER_REFRESH_N[i],
+                       "reason": "age %.0f min" % (age / 60.0)},
                       open(cmd_p, "w"), ensure_ascii=False)
         except Exception as e:
             log("keeper%d 刷新命令寫入失敗：%s — 退回殺掉重建" % (i, repr(e)[:50]))
@@ -684,7 +705,8 @@ def keeper_recycle_old(nodes, max_age_s):
         log("keeper%d 齡 %.1f 分 ≥ 上限 %.1f 分 — 發自我刷新命令（原地換 session）"
             % (i, age / 60.0, max_age_s / 60.0))
         hit_ledger(event="keeper-recycle", slot=i, sku=KEEPER_FLEET[i],
-                   up=int(age), state="refresh-sent", restarted=False)
+                   up=int(age), state="refresh-sent", restarted=False,
+                   refresh_n=KEEPER_REFRESH_N[i])
         return 0
     return 0
 
