@@ -172,20 +172,56 @@ def main():
             log("!! 入袋 0 件，中止"); rec(phase="abort", why="bag-empty"); return
 
         # ---- 結帳 → 訪客（複製生產入口邏輯）----
-        page.goto(f"{C.SHOP}/bag", wait_until="domcontentloaded", timeout=45000)
-        page.wait_for_timeout(2500)
-        C.click_text(page, ["結帳", "立即結帳", "Check Out"],
-                     exclude=["Apple Pay", "Pay"], timeout=8000)
-        for _ in range(12):
+        def _entry():
+            """與生產 checkout_flow 的入口邏輯逐字對齊（元素級等待 + click_text 後備）。"""
+            page.goto(f"{C.SHOP}/bag", wait_until="domcontentloaded", timeout=45000)
+            try:
+                btn = page.locator(
+                    "button:has-text('結帳'), a:has-text('結帳'), "
+                    "[role=button]:has-text('結帳'), "
+                    "input[type=submit][value*='結帳'], "
+                    "input[type=button][value*='結帳'], "
+                    "button:has-text('Check Out'), a:has-text('Check Out'), "
+                    "[role=button]:has-text('Check Out')").first
+                btn.wait_for(state="visible", timeout=10000)
+                t = (btn.text_content() or "").strip()
+                if "Apple Pay" not in t and "Pay" not in t:
+                    btn.click(timeout=3000)
+                    log("  點擊結帳入口「%s」" % t[:20])
+                    return True
+            except Exception as e:
+                log("  入口元素點擊失敗 %s" % repr(e)[:40])
+            return C.click_text(page, ["結帳", "立即結帳", "Check Out"],
+                                exclude=["Apple Pay", "Pay"], timeout=8000)
+
+        ok_entry = _entry()
+        log("  入口已點=%s url=%s" % (ok_entry, page.url[:80]))
+        for _i in range(18):
             page.wait_for_timeout(1500)
             if C.click_text(page, ["以訪客身份繼續", "繼續以訪客身份結帳",
                                    "Continue as Guest"]):
+                log("  點到訪客按鈕（第 %d 輪）" % (_i + 1))
                 break
             if "Fulfillment" in page.url:
+                log("  已在 Fulfillment（免訪客）")
                 break
+            if _i in (4, 9) and ("/bag" in (page.url or "")
+                                 or "signIn" in (page.url or "")):
+                log("  訪客未出，重按入口（第 %d 次）url=%s" % (_i // 5, page.url[:70]))
+                _entry()
+                page.wait_for_timeout(1200)
         log("  訪客 URL=%s" % page.url[:100])
         if "Fulfillment" not in (page.url or ""):
-            log("!! 沒進訪客結帳，中止"); rec(phase="abort", why="guest", url=page.url[:100]); return
+            try:
+                txt = page.evaluate("""() => Array.from(document.querySelectorAll(
+                    'button,a[role=button],[role=button],a')).slice(0,40)
+                    .map(e => (e.innerText||'').trim().slice(0,18)).filter(Boolean)
+                    .join(' | ')""")
+            except Exception as e:
+                txt = "ERR " + repr(e)[:40]
+            log("!! 沒進訪客結帳 url=%s 當頁按鈕/連結=%s" % (page.url[:90], txt[:300]))
+            rec(phase="abort", why="guest", url=page.url[:110], buttons=txt[:400])
+            return
 
         host = (page.url or "").split("/")[2]
         base = (page.url or "").split("?")[0]
