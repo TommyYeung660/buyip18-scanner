@@ -1,0 +1,88 @@
+name: nav reset probe (temp, read-only DRY_RUN)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mihomo
+        run: |
+          MH_VER=v1.19.30
+          curl -sL -o /tmp/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/${MH_VER}/mihomo-linux-amd64-v1-${MH_VER}.gz"
+          gunzip -f /tmp/mihomo.gz && chmod +x /tmp/mihomo && sudo mv /tmp/mihomo /usr/local/bin/mihomo
+
+      - name: Start mihomo (HK BUY listener on 7891)
+        env:
+          SCAN_NODES_JSON: ${{ secrets.SCAN_NODES_JSON }}
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          nodes = json.loads(os.environ["SCAN_NODES_JSON"])
+          def rank(name):
+              if "家宽" in name: return 0
+              if "直连" in name or "原生" in name: return 1
+              if "IPLC" in name: return 2
+              return 3
+          hk = sorted([n["name"] for n in nodes if "香港" in n["name"]], key=rank)
+          cfg = {
+            "mixed-port": 7890,
+            "external-controller": "127.0.0.1:9090",
+            "mode": "rule", "log-level": "warning",
+            "dns": {"enable": True, "nameserver": ["8.8.8.8", "1.1.1.1"]},
+            "listeners": [{"name": "buy", "type": "mixed", "port": 7891,
+                           "listen": "127.0.0.1", "proxy": "BUY"}],
+            "proxies": list(nodes),
+            "proxy-groups": [
+              {"name": "BUY", "type": "fallback", "proxies": hk or [nodes[0]["name"]],
+               "url": "https://www.apple.com/hk-zh/shop/retail/pickup-message?pl=true&fae=true&mts.0=regular&parts.0=MJXQ4ZA/A&location=Hong%20Kong",
+               "interval": 60, "expected-status": "200", "lazy": False}],
+            "rules": ["MATCH,BUY"],
+          }
+          os.makedirs("/tmp/mihomo-data", exist_ok=True)
+          json.dump(cfg, open("/tmp/mihomo.yaml", "w"), ensure_ascii=False)
+          print("BUY 出口候選:", hk or "（無）")
+          EOF
+          nohup mihomo -f /tmp/mihomo.yaml -d /tmp/mihomo-data > /tmp/mihomo.log 2>&1 &
+          for i in $(seq 1 15); do curl -s -m 4 -x http://127.0.0.1:7891 https://api.ipify.org && break; sleep 2; done
+          echo "實驗出口 IP: $(curl -s -m 10 -x http://127.0.0.1:7891 https://api.ipify.org)"
+
+      - name: Clone checkout engine (private)
+        env:
+          CHECKOUT_PAT: ${{ secrets.CHECKOUT_PAT }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${CHECKOUT_PAT}@github.com/TommyYeung660/buyip18-checkout.git" /tmp/co
+          echo "engine HEAD: $(git -C /tmp/co rev-parse --short HEAD)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright chromium
+        run: |
+          pip install -q playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Run nav pairing probe
+        env:
+          PROXY_PORT: "7891"
+          CO_DIR: /tmp/co
+          PROBE_OUT: /tmp/out
+        run: |
+          mkdir -p /tmp/out
+          python3 tools/nav_pair_real.py 2>&1 | tee /tmp/out/np.log
+          echo "=== 摘要 ==="
+          grep -E "^(  [A-F]_|===|  host=|  選店|  取貨|    導航|    量測)" /tmp/out/np.log | tail -60
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nav-probe-${{ github.run_id }}
+          path: /tmp/out/
