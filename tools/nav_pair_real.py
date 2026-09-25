@@ -251,7 +251,10 @@ def main():
             _adv = {"host": host, "stk": stk(page), "mode": "B"}
             log("  呼叫生產 keeper_buy_http（adv mode=B, store=%s）" % STORE)
             try:
-                res = C.keeper_buy_http(page, _adv, STORE, prof)
+                _prof2 = {"name": "probe", "email": "probe@example.com",
+                          "phone": "51234567", "first_name": "Probe",
+                          "last_name": "Test"}
+                res = C.keeper_buy_http(page, _adv, STORE, _prof2)
             except Exception as e:
                 import traceback; traceback.print_exc()
                 res = "EXC:%r" % (e,)
