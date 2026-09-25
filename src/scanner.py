@@ -513,6 +513,25 @@ def keeper_boot_break(i, age, prev, exit_code, short_life=300, base=120, cap=180
     return True
 
 
+def _keeper_log_tail(i, lines=6, width=420):
+    """keeper 的 stdout 尾巴（死在鏈上時唯一的現場）。
+
+    為什麼需要：keeper 的 stdout 只寫到 runner 本機的 /tmp/keeper/slotN/keeper.log
+    （keeper_start 的 stdout=…），run 被 cancel 或結束後就沒了；in-progress 的 job log
+    也讀不到。於是 9/25 20:03-20:06 的三連死（refresh-exhausted）只能靠推論。
+    ⚠ 只寫進**私有**的帳本（hits.jsonl 推的是 private checkout repo），
+    絕不 log() 到 public job log——keeper 的 stdout 可能含個資（email／姓名）。
+    """
+    try:
+        p = os.path.join(_kslot_dir(i), "keeper.log")
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            tail = f.read()[-4000:]
+        out = " | ".join([l for l in tail.strip().splitlines()[-lines:]])
+        return out[-width:]
+    except Exception:
+        return ""
+
+
 def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
     """逐 slot 自癒：①進程死（過冷卻）→ 重開 ②進程活但卡住（建袋超 7 分未停泊，
     如 Playwright wedge）→ 殺掉重開。9/19 首次艦隊實證：2 個 slot 卡在建袋期
@@ -541,6 +560,10 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
                        state="dead", exit=proc.returncode,
                        prev=str(_prev.get("state") or ""),
                        reason=str(_prev.get("reason") or "")[:70],
+                       # 死在換 session 的哪一步（checkout 的 _kwrite step）與 stdout 尾巴：
+                       # 沒有這兩個欄位，refresh-exhausted 這種「用盡」型終態無法歸因。
+                       step=str(_prev.get("step") or "")[:24],
+                       log_tail=_keeper_log_tail(i),
                        up=int(age), fails=KEEPER_FAILS.get(i, {}).get("n", 0),
                        restarted=bool(_ok))
             if _ok:
