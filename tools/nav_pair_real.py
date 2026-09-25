@@ -112,9 +112,40 @@ def main():
             args.append("--proxy-server=http://127.0.0.1:%s" % _pp)
         log("瀏覽器代理=%s" % ("127.0.0.1:" + _pp if _pp else "（直連）"))
         br = pw.chromium.launch(headless=True, args=args)
-        ctx = br.new_context(viewport={"width": 1280, "height": 900},
-                             locale="zh-HK")
+        # ⚠ 9/25 定案（記憶 apple-risk-541）：入袋 fetch 被 541 閘的是 UA/指紋，
+        # 不是出口——生產 checkout.py 自己用 Chrome/131 且無 stealth 就是「被閘的
+        # 形狀」；實測 Safari UA 才 200，只加 stealth（留 Chrome UA）仍然 541。
+        # 本 harness 走同一條入袋路徑 ⇒ 必須用 Safari UA + stealth。
+        ctx = br.new_context(
+            viewport={"width": 1280, "height": 900}, locale="zh-HK",
+            user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                        "Version/17.6 Safari/605.1.15"))
+        ctx.add_init_script("""
+          Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+          Object.defineProperty(navigator, 'languages', {get: () => ['zh-HK','zh','en']});
+          Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+          window.chrome = window.chrome || {runtime: {}};
+          Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});
+        """)
         page = ctx.new_page()
+
+        # ---- 前置驗證：只載商品頁，確認 UA/出口可及（541 是可及性閘，先量到才算）----
+        try:
+            r0 = page.goto(C.PRODUCT_URL, wait_until="domcontentloaded", timeout=60000)
+            st0 = r0.status if r0 else -1
+        except Exception as e:
+            st0 = -1
+            log("  前置載入例外 %s" % repr(e)[:60])
+        u0 = (page.url or "")[:90]
+        bad0 = (st0 != 200) or ("541" in u0) or ("/shop/go/404" in u0) or ("sorry" in u0)
+        log("  前置：status=%s bad=%s url=%s" % (st0, bad0, u0))
+        rec(phase="preflight", status=st0, bad=bad0, url=u0,
+            ua="Safari/605.1.15")
+        if bad0:
+            log("!! 前置即被擋（541/404）⇒ 後續無法進行，只回報 UA 結論")
+            rec(phase="abort", why="preflight-blocked", status=st0)
+            return
 
         # ---- 真實入袋 ----
         log("→ 入袋 " + CARDS[0][0])
