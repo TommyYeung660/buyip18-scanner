@@ -256,12 +256,21 @@ def main():
             for label, tgt in TARGETS:
                 # 每個目標都要**全新的會話**（鏈會推進狀態，同一會話測不了第二個目標）
                 try:
+                    # 用**生產自己的 fill_bag**（含 10 輪便宜重載重試）建袋。
+                    # 自組迴圈兩次都害實驗空轉：541 是 ~50% 的機率閘，入袋全敗時
+                    # 袋是空的，而**空袋去 /bag 不會有結帳入口** ⇒ 四臂全在建會話失敗。
                     page.goto(C.PRODUCT_URL, wait_until="domcontentloaded", timeout=60000)
                     page.wait_for_timeout(1200)
-                    for _t in range(5):
-                        if C.add_to_bag(page, ctx, CAND_OK := ["6.9", "布根地紅色", "256GB"]):
-                            break
-                        time.sleep(6)
+                    _cand = ["6.9", "布根地紅色", "256GB"]
+                    try:
+                        _n = C.fill_bag(page, ctx, [_cand], [_cand], False, 0)
+                    except SystemExit:
+                        _n = 0
+                    if not _n or _n <= 0:
+                        log("  臂 %s：入袋失敗（fill_bag 回 %r）— 跳過此臂" % (label, _n))
+                        rec(phase="navmap", arm=label, target=tgt, ok=False, why="bag-failed")
+                        continue
+                    log("  臂 %s：入袋 %d 件" % (label, _n))
                     page.goto(f"{C.SHOP}/bag", wait_until="domcontentloaded", timeout=45000)
                     page.wait_for_timeout(2000)
                     _entry()
