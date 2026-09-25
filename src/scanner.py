@@ -352,9 +352,30 @@ def keeper_ready_count():
 
 
 def keeper_start(nodes, slot):
-    """啟動第 slot 個駐場引擎（純袋 = KEEPER_FLEET[slot]）。回傳 True=已起。"""
+    """啟動第 slot 個駐場引擎（純袋 = KEEPER_FLEET[slot]）。回傳 True=已起。
+
+    ⛔ 啟動前**必須**確認舊進程已死（見下方 guard）。一個 slot 同時有兩個 keeper
+    就會共用同一個命令檔與 state.json，而 `KEEPER_REFRESH_N` 序號記憶是**進程內**的
+    ⇒ 跨進程無效 ⇒ 同一則 refresh 命令被兩個進程各消費一次、各自跑完 3 次換 session
+    後 exit 43。這正是 9/25-26 整夜 refresh-exhausted（31 次）與 9/26 07:23-07:26
+    四連死的形狀（帳本：掃描器每 19 分只送一則，keeper 卻回報 3 次 REFRESH）。
+    """
     import shutil
     import subprocess
+    _old = KEEPER_PROCS.get(slot)
+    if _old is not None and _old.poll() is None:
+        try:
+            _old.kill()
+            _old.wait(timeout=5)
+        except Exception:
+            pass
+        log("keeper%d 啟動前舊進程仍活著（pid %s）— 已殺掉再起（防止雙進程共用命令檔）"
+            % (slot, getattr(_old, "pid", "?")))
+        try:
+            hit_ledger(event="keeper-restart", slot=slot, sku=KEEPER_FLEET[slot],
+                       state="double-start-killed", restarted=True)
+        except Exception:
+            pass
     pat = os.environ.get("GH_PAT", "").strip()
     if not pat or not os.environ.get("PROFILES_JSON", "").strip():
         log("keeper 未啟用（缺 GH_PAT/PROFILES_JSON secret）")
