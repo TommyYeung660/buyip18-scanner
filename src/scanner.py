@@ -20,9 +20,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
-# 9/19 用戶放寬：256GB+512GB+1TB 都買（布根地紅/冰川色）——2TB 維持不掃不購
-PARTS = ["MJXQ4ZA/A", "MJXR4ZA/A", "MJXV4ZA/A", "MJXW4ZA/A",
-         "MJY04ZA/A", "MJY14ZA/A"]
+# 9/25 用戶收緊：只買 紅/黑 × 256GB+512GB（4 SKU）——其餘色/容量不掃不購
+PARTS = ["MJXQ4ZA/A", "MJXN4ZA/A", "MJXV4ZA/A", "MJXT4ZA/A"]
 MAX_PARTS = 3                       # pickup-message 上限，>3 會 541
 PER_NODE_GAP_S = 15                 # 每節點兩次請求的最小間距（共享出口禮貌）
 NODE_COOLDOWN_S = 900               # 節點單次失敗的冷卻秒數（15 分）
