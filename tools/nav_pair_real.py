@@ -51,6 +51,10 @@ os.environ["KEEPER_NAV_ANY"] = "1"
 import checkout as C  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 
+UA_SAFARI = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+             "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15")
+UA_CHROME = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 COOL = 12          # 秒；讓節流閘自然過期（>10s）
 GAP = 1            # 秒；刻意踩閘
 CARDS = [("MJXQ4ZA/A", ["6.9", "布根地紅色", "256GB"]),
@@ -118,9 +122,8 @@ def main():
         # 本 harness 走同一條入袋路徑 ⇒ 必須用 Safari UA + stealth。
         ctx = br.new_context(
             viewport={"width": 1280, "height": 900}, locale="zh-HK",
-            user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                        "Version/17.6 Safari/605.1.15"))
+            user_agent=(UA_SAFARI if os.environ.get("UA_ARM", "safari") == "safari"
+                        else UA_CHROME))
         ctx.add_init_script("""
           Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
           Object.defineProperty(navigator, 'languages', {get: () => ['zh-HK','zh','en']});
@@ -196,21 +199,29 @@ def main():
 
         ok_entry = _entry()
         log("  入口已點=%s url=%s" % (ok_entry, page.url[:80]))
+        # ⚠ 只有在 URL 真的到 Fulfillment 才算進到結帳（9/25 實證：click_text 子串
+        # 會命中別的含「以訪客身份繼續」的元素，點完落在 /signIn ——「點到就 break」
+        # 會帶著 signIn 頁往下走，後面每一步都必然失敗）。
+        _guest_clicks = 0
         for _i in range(18):
             page.wait_for_timeout(1500)
+            if "Fulfillment" in (page.url or ""):
+                break
             if C.click_text(page, ["以訪客身份繼續", "繼續以訪客身份結帳",
                                    "Continue as Guest"]):
-                log("  點到訪客按鈕（第 %d 輪）" % (_i + 1))
-                break
-            if "Fulfillment" in page.url:
-                log("  已在 Fulfillment（免訪客）")
-                break
-            if _i in (4, 9) and ("/bag" in (page.url or "")
-                                 or "signIn" in (page.url or "")):
-                log("  訪客未出，重按入口（第 %d 次）url=%s" % (_i // 5, page.url[:70]))
+                _guest_clicks += 1
+                log("  點到訪客按鈕（第 %d 輪，第 %d 次）url=%s"
+                    % (_i + 1, _guest_clicks, page.url[:70]))
+                page.wait_for_timeout(1500)
+                if "Fulfillment" in (page.url or ""):
+                    break
+            if _i in (4, 9, 13) and ("/bag" in (page.url or "")
+                                     or "signIn" in (page.url or "")):
+                log("  未到 Fulfillment，重按入口（第 %d 次）url=%s"
+                    % (_i // 5, page.url[:70]))
                 _entry()
                 page.wait_for_timeout(1200)
-        log("  訪客 URL=%s" % page.url[:100])
+        log("  訪客 URL=%s（訪客點擊 %d 次）" % (page.url[:100], _guest_clicks))
         if "Fulfillment" not in (page.url or ""):
             try:
                 txt = page.evaluate("""() => Array.from(document.querySelectorAll(
@@ -227,7 +238,8 @@ def main():
         base = (page.url or "").split("?")[0]
         log("  host=%s base=%s stk=%s" % (host, base, stk(page)))
         rec(phase="session", host=host, base=base, stk=stk(page),
-            bag=n, url=page.url[:120])
+            bag=n, url=page.url[:120], ua=os.environ.get("UA_ARM", "safari"),
+            guest_clicks=_guest_clicks)
 
         # ---- 真實第一步：選店（生產字串）----
         q_store = ("_a=continue&_m=checkout.fulfillment"
