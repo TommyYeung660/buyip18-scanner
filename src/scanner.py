@@ -885,6 +885,13 @@ def main():
                                # nav_skip＝沒導航的原因、nav_stk＝導航後 stk 有無換。
                                nav=_st0.get("nav"), nav_skip=str(_st0.get("nav_skip") or "")[:24],
                                nav_stk=_st0.get("nav_stk"), nav_ms=_st0.get("nav_ms"),
+                               # ⛔ 9/25 查不到 fail 的元凶：這張清單是逐欄列舉，漏了
+                               # probe_ms ⇒ keeper 明明有算、寫進 state.json，帳本
+                               # （唯一權威）卻看不到「鏈開始前花了幾秒」。ka_age_ms
+                               # 同理——它是「命中距上次保活多久」，用來驗證節流閘
+                               # 是否也吃 GET（若是，保活後 ~10 秒內命中＝第一發必墊 10 秒）。
+                               probe_ms=_st0.get("probe_ms"),
+                               ka_age_ms=_st0.get("ka_age_ms"),
                                park_survived=_st0.get("park_survived"))
                     # 動態停泊：無論這次下單成敗，都趁熱把該店停起來。
                     # 只發命令、不改本次流程——keeper 下單後會自己重建再停泊。
