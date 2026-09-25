@@ -241,6 +241,32 @@ def main():
             bag=n, url=page.url[:120], ua=os.environ.get("UA_ARM", "safari"),
             guest_clicks=_guest_clicks)
 
+        # ---- MODE=chain：直接呼叫**生產的** keeper_buy_http（真字串、真步驟）----
+        # 為什麼不自己組 POST：9/25 自組的 qs 全部回 403，量到的是拒絕路徑而非節流
+        # 路徑，等於沒量到閘。生產函式自帶 _buy_step → BUY_TRACE 會給逐步 ms，
+        # 且 DRY_RUN 會在 placeOrder 之前停手（不下單）。
+        if os.environ.get("MODE", "arms") == "chain":
+            C.BUY_TRACE.clear()
+            C.NAV_FACT.update({"n": 0, "stk_changed": False, "skip": "", "next_seen": "", "ms": 0})
+            _adv = {"host": host, "stk": stk(page), "mode": "B"}
+            log("  呼叫生產 keeper_buy_http（adv mode=B, store=%s）" % STORE)
+            try:
+                res = C.keeper_buy_http(page, _adv, STORE, prof)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                res = "EXC:%r" % (e,)
+            log("  結果=%r" % (res,))
+            log("  BUY_TRACE=%s" % ";".join(C.BUY_TRACE))
+            log("  NAV n=%s stk_changed=%s skip=%s ms=%s"
+                % (C.NAV_FACT.get("n"), C.NAV_FACT.get("stk_changed"),
+                   C.NAV_FACT.get("skip"), C.NAV_FACT.get("ms")))
+            rec(phase="chain", result=str(res), buy_steps=";".join(C.BUY_TRACE),
+                nav=C.NAV_FACT.get("n"), nav_stk=C.NAV_FACT.get("stk_changed"),
+                nav_skip=C.NAV_FACT.get("skip"), nav_ms=C.NAV_FACT.get("ms"),
+                host=host, ua=os.environ.get("UA_ARM", "safari"))
+            br.close()
+            return
+
         # ---- 真實第一步：選店（生產字串）----
         q_store = ("_a=continue&_m=checkout.fulfillment"
                    "&checkout.fulfillment.fulfillmentOptions"

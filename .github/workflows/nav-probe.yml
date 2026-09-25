@@ -76,9 +76,9 @@ jobs:
           PROBE_OUT: /tmp/out
         run: |
           mkdir -p /tmp/out
-          for ARM in safari chrome; do
+          for ARM in safari; do
             echo "################ UA 臂 = $ARM ################"
-            UA_ARM=$ARM python3 tools/nav_pair_real.py 2>&1 | tee -a /tmp/out/np.log
+            MODE=chain UA_ARM=$ARM python3 tools/nav_pair_real.py 2>&1 | tee -a /tmp/out/np.log
           done
           echo "=== 摘要 ==="
           grep -E "前置|入袋 [0-9]|入口|訪客|host=|base=|選店 R|取貨聯絡人|第[123]輪|導航|量測|總耗時|按鈕|^  [A-F]_|^===" /tmp/out/np.log | tail -80
