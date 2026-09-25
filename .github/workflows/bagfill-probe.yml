@@ -1,0 +1,118 @@
+name: bagfill UA x exit probe (temp, read-only DRY_RUN)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mihomo
+        run: |
+          MH_VER=v1.19.30
+          curl -sL -o /tmp/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/${MH_VER}/mihomo-linux-amd64-v1-${MH_VER}.gz"
+          gunzip -f /tmp/mihomo.gz && chmod +x /tmp/mihomo && sudo mv /tmp/mihomo /usr/local/bin/mihomo
+
+      - name: Start mihomo (HK BUY listener on 7891)
+        env:
+          SCAN_NODES_JSON: ${{ secrets.SCAN_NODES_JSON }}
+          SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          nodes = json.loads(os.environ["SCAN_NODES_JSON"])
+          def rank(name):
+              if "家宽" in name: return 0
+              if "直连" in name or "原生" in name: return 1
+              if "IPLC" in name: return 2
+              return 3
+          hk = sorted([n["name"] for n in nodes if "香港" in n["name"]], key=rank)
+          try:
+              sp = json.loads(os.environ.get("SLOT_PROXIES_JSON") or "[]")
+          except Exception:
+              sp = []
+          listeners = [{"name": "buy", "type": "mixed", "port": 7891,
+                        "listen": "127.0.0.1", "proxy": "BUY"}]
+          proxies = list(nodes)
+          for i, q in enumerate(sp):
+              nm = "SLOT%02d" % i
+              proxies.append({"name": nm, "type": "http", "server": q["host"],
+                              "port": int(q["port"]), "username": q["user"],
+                              "password": q["pass"]})
+              listeners.append({"name": "slot%d" % i, "type": "mixed",
+                                "port": 7892 + i, "listen": "127.0.0.1", "proxy": nm})
+          print("per-slot 專屬出口:", len(sp))
+          cfg = {
+            "mixed-port": 7890,
+            "external-controller": "127.0.0.1:9090",
+            "mode": "rule", "log-level": "warning",
+            "dns": {"enable": True, "nameserver": ["8.8.8.8", "1.1.1.1"]},
+            "listeners": listeners,
+            "proxies": proxies,
+            "proxy-groups": [
+              {"name": "BUY", "type": "fallback", "proxies": hk or [nodes[0]["name"]],
+               "url": "https://www.apple.com/hk-zh/shop/retail/pickup-message?pl=true&fae=true&mts.0=regular&parts.0=MJXQ4ZA/A&location=Hong%20Kong",
+               "interval": 60, "expected-status": "200", "lazy": False}],
+            "rules": ["MATCH,BUY"],
+          }
+          os.makedirs("/tmp/mihomo-data", exist_ok=True)
+          json.dump(cfg, open("/tmp/mihomo.yaml", "w"), ensure_ascii=False)
+          print("BUY 出口候選:", hk or "（無）")
+          EOF
+          nohup mihomo -f /tmp/mihomo.yaml -d /tmp/mihomo-data > /tmp/mihomo.log 2>&1 &
+          for i in $(seq 1 15); do curl -s -m 4 -x http://127.0.0.1:7891 https://api.ipify.org && break; sleep 2; done
+          echo "BUY 池出口: $(curl -s -m 10 -x http://127.0.0.1:7891 https://api.ipify.org)"
+          echo "slot0 專屬出口: $(curl -s -m 12 -x http://127.0.0.1:7892 https://api.ipify.org)"
+          echo "slot1 專屬出口: $(curl -s -m 12 -x http://127.0.0.1:7893 https://api.ipify.org)"
+
+      - name: Clone checkout engine (private)
+        env:
+          CHECKOUT_PAT: ${{ secrets.CHECKOUT_PAT }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${CHECKOUT_PAT}@github.com/TommyYeung660/buyip18-checkout.git" /tmp/co
+          echo "engine HEAD: $(git -C /tmp/co rev-parse --short HEAD)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright chromium
+        run: |
+          pip install -q playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Run bagfill UA x exit probe
+        env:
+          CO_DIR: /tmp/co
+          PROBE_OUT: /tmp/out
+          N: "6"
+        run: |
+          mkdir -p /tmp/out
+          for spec in "buy-7891:safari" "buy-7891:chrome" "slot0-7892:safari" "slot0-7892:chrome"; do
+            A="${spec%%:*}"; U="${spec##*:}"; P="${A##*-}"
+            echo "######## 臂 $A / UA=$U ########"
+            ARM="$A" UA_ARM="$U" PROXY_PORT="$P" python3 tools/bagfill_probe.py 2>&1 | tail -12
+          done
+          echo "=== 逐臂彙總（入袋成功/嘗試）==="
+          python3 - <<'EOF'
+          import json, collections
+          c = collections.Counter(); n = collections.Counter()
+          for l in open("/tmp/out/bagfill.jsonl"):
+              d = json.loads(l)
+              if d.get("phase") == "add" and d.get("i"):
+                  n[(d["arm"], d["ua"])] += 1
+                  if d.get("ok"): c[(d["arm"], d["ua"])] += 1
+          for k in sorted(n): print("  %-14s %-7s %d/%d" % (k[0], k[1], c[k], n[k]))
+          EOF
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nav-probe-${{ github.run_id }}
+          path: /tmp/out/
