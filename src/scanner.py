@@ -412,7 +412,10 @@ def keeper_start(nodes, slot):
                        or (open("/tmp/vncpw").read().strip()
                            if os.path.exists("/tmp/vncpw") else "")))
     proc = subprocess.Popen(
-        ["python3", "checkout.py"], cwd=eng, env=env,
+        # -u ＝ 不緩衝 stdout。9/26 實證：keeper 跑 57 分鐘、keeper.log **讀出來是空的**
+        # （stdout 重導到檔案＝塊緩衝，緩衝區沒滿就不落盤），於是 log_tail 這個為歸因
+        # 而加的欄位一路是空字串。log_tail 的價值全在「進程還沒死就能讀」。
+        ["python3", "-u", "checkout.py"], cwd=eng, env=env,
         stdout=open(os.path.join(_kslot_dir(slot), "keeper.log"), "w"),
         stderr=subprocess.STDOUT)
     KEEPER_PROCS[slot] = proc
@@ -582,6 +585,8 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
                        # 死在換 session 的哪一步（checkout 的 _kwrite step）與 stdout 尾巴：
                        # 沒有這兩個欄位，refresh-exhausted 這種「用盡」型終態無法歸因。
                        step=str(_prev.get("step") or "")[:24],
+                       refresh_n=_prev.get("refresh_n"),
+                       refresh_hits=_prev.get("refresh_hits"),
                        log_tail=_keeper_log_tail(i),
                        up=int(age), fails=KEEPER_FAILS.get(i, {}).get("n", 0),
                        restarted=bool(_ok))
