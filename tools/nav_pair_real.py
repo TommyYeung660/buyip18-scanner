@@ -241,6 +241,56 @@ def main():
             bag=n, url=page.url[:120], ua=os.environ.get("UA_ARM", "safari"),
             guest_clicks=_guest_clicks)
 
+        # ---- MODE=navpair：在**同一個已建立的真實會話**內測「導航是否清閘」----
+        # 設計要點（前三次失敗的教訓）：不重建會話、不用個資。
+        #   · 量測器＝**生產的選店 POST**（q_store 無 profile 欄位；重送是 no-op 但
+        #     一樣吃節流閘——9/23 nav_reset_which 已證 no-op POST 會被墊 6.6-9.7 秒）。
+        #   · 協定：先發一發把閘「花掉」→ 立刻導航（或不做）→ 量下一發。
+        #     不導航 ⇒ ~10 秒（證明閘真的在）；導航若真能清閘 ⇒ ~0.3 秒。
+        #   · 全程不下單、不結帳、不填卡（DRY_RUN）。
+        if os.environ.get("MODE") == "navpair":
+            base = (page.url or "").split("?")[0]
+            Q_STORE = ("_a=continue&_m=checkout.fulfillment"
+                       "&checkout.fulfillment.fulfillmentOptions"
+                       "&checkout.fulfillment.pickupTab.pickup.storeLocator.showAllStores=false"
+                       "&checkout.fulfillment.pickupTab.pickup.storeLocator.selectStore=" + STORE +
+                       "&checkout.fulfillment.pickupTab.pickup.storeLocator.searchInput="
+                       "%E9%A6%99%E6%B8%AF")
+            log("base=%s stk=%s" % (base, stk(page)))
+
+            def _one(_qs):
+                t0 = time.time()
+                r = C._keeper_cx(page, _qs)
+                return int((time.time() - t0) * 1000), r.get("status")
+
+            m0, s0 = _one(Q_STORE)                      # 推進狀態＋花掉閘
+            log("  起始選店 %dms http=%s url=%s" % (m0, s0, page.url[:70]))
+            arms = [("不導航(對照)", None),
+                    ("Fulfillment-init", base + "?_s=Fulfillment-init"),
+                    ("Shipping-init(現行contact目標)", base + "?_s=Shipping-init"),
+                    ("Billing-init", base + "?_s=Billing-init"),
+                    ("apw/checkout(av-302)", base.replace("/shop/checkout", "/shop/apw/checkout")
+                     + "?_s=Fulfillment-init")]
+            for rep in (1, 2):
+                for label, tgt in arms:
+                    m1, _st1 = _one(Q_STORE)            # 花掉閘
+                    nv_ms, nv_url = None, None
+                    if tgt:
+                        nv_ms, nv_url = nav(page, tgt)
+                    else:
+                        time.sleep(0.3)
+                    m2, st2 = _one(Q_STORE)             # 量測
+                    log("  第%d輪 %-30s 前置=%dms 導航=%sms 量測=%dms http=%s stk_changed=%s"
+                        % (rep, label, m1, nv_ms, m2, st2, C.NAV_FACT.get("stk_changed")))
+                    rec(phase="navpair", rep=rep, arm=label, target=tgt, pre_ms=m1,
+                        nav_ms=nv_ms, ms=m2, http=st2, nav_url=(nv_url if isinstance(nv_url, str) else None))
+            log("=== navpair 摘要（量測 ms；~10 秒＝閘沒清）===")
+            for label, _t in arms:
+                v = sorted(x["ms"] for x in RES if x.get("phase") == "navpair" and x.get("arm") == label)
+                log("  %-32s %s" % (label, v))
+            br.close()
+            return
+
         # ---- MODE=navmap：導航目標 A/B（同一支生產 keeper_buy_http，只換 NAV_SELF_PAGES）----
         # 提示詞的判讀表：命中後「選店快、其後每步 ≈10 秒」⇒ 該步的頁面映射猜錯。
         # 9/25 生產三發正是此形狀（選店 547/720ms，其後 7.5-9.3 秒），且 nav 後 stk 沒換。
