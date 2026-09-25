@@ -443,6 +443,13 @@ KEEPER_FAILS = {}   # slot -> {"n": 連續開機即死次數, "until": 退避到
 # REFRESH_TIMEOUT_S 仍未回武裝 ⇒ 退回「殺掉重建」（keeper 生命週期外的保險）。
 KEEPER_REFRESH_SENT = {}
 REFRESH_TIMEOUT_S = 180
+# 原地換 session 成功的時刻（slot -> ts）。⛔ 9/25 實證明確：refresh 是**同一個進程**
+# 的工作，不會更新 KEEPER_LASTSTART ⇒ 若不另外記「最近一次換 session」，slot 的齡
+# 永遠 > 門檻 ⇒ 掃描器每一輪都再發一次 refresh（實測 slot2 在 100 秒內被發 5 次、
+# slot3 三分鐘 6 次）⇒ 無限刷新迴圈：該 slot 永遠武裝不起來（最後 refresh-exhausted
+# → exit 43），其他 slot 則因 refresh 名額被佔而等到會話過期。**換 session 必須
+# 等價於「齡歸零」**才能讓這條路徑收斂。
+KEEPER_RENEWED = {}
 
 
 def _fleet_armed():
@@ -594,6 +601,7 @@ def keeper_recycle_old(nodes, max_age_s):
     for j in list(KEEPER_REFRESH_SENT):          # 刷新成功的清掉在途記錄
         if (keeper_state(j) or {}).get("state") in KEEPER_ARMED:
             KEEPER_REFRESH_SENT.pop(j, None)
+            KEEPER_RENEWED[j] = time.time()      # 換 session 成功 ⇒ 齡歸零（見上）
     cands = sorted(range(len(KEEPER_FLEET)),
                    key=lambda j: KEEPER_LASTSTART.get(j, 0))
     # ⚠ 9/25 實證修正：原本這裡是**艦隊級**閘（任何 slot 進程死了、或武裝數 <5、
@@ -604,7 +612,9 @@ def keeper_recycle_old(nodes, max_age_s):
     # 不再被其他 slot 的狀態拖累；只保留「最多 2 個 refresh 在途」的節制。
     _in_flight = len(KEEPER_REFRESH_SENT)
     for i in cands:
-        age = now - KEEPER_LASTSTART.get(i, 0)
+        # 齡 = 距「進程啟動」或「最近一次成功換 session」較近者（原地換 session 不重啟
+        # 進程，只有這樣才會收斂；見 KEEPER_RENEWED 的宣告處）。
+        age = now - max(KEEPER_LASTSTART.get(i, 0), KEEPER_RENEWED.get(i, 0))
         if age < max_age_s:
             continue
         # ⛔ 在途檢查必須排在「未武裝就跳過」**之前**：refresh 進行中的 slot 正是
