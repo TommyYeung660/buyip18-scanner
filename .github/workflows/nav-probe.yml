@@ -1,6 +1,10 @@
 name: nav reset probe (temp, read-only DRY_RUN)
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "chain=生產鏈單臂 / navmap=導航目標四臂 A/B"
+        default: "navmap"
 
 permissions:
   contents: read
@@ -74,6 +78,7 @@ jobs:
           PROXY_PORT: "7891"
           CO_DIR: /tmp/co
           PROBE_OUT: /tmp/out
+          MODE: ${{ inputs.mode }}
         run: |
           mkdir -p /tmp/out
           for ARM in safari; do
@@ -81,7 +86,7 @@ jobs:
             MODE=${MODE:-chain} UA_ARM=$ARM python3 tools/nav_pair_real.py 2>&1 | tee -a /tmp/out/np.log
           done
           echo "=== 摘要 ==="
-          grep -E "前置|入袋 [0-9]|入口|訪客|host=|base=|選店 R|取貨聯絡人|第[123]輪|導航|量測|總耗時|按鈕|^  [A-F]_|^===" /tmp/out/np.log | tail -80
+          grep -E "前置|入袋 [0-9]|入口|訪客|host=|base=|選店 R|取貨聯絡人|第[123]輪|導航|量測|總耗時|按鈕|^  [A-F]_|^===|原始 NAV_SELF|臂 |結果=" /tmp/out/np.log | tail -100
 
       - name: Upload log
         if: always()
