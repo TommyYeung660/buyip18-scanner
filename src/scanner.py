@@ -610,6 +610,10 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
             # spell 從何而來」結構上答不出（9/23 08:47:31 slot4 那次「ready 一瞬
             # 即逝」＝補位後又死一次，只能靠 latest.json 時間線猜）。終態檔多半
             # 還在，把它的 state/reason 一起抄進來即可歸因。
+            # ⚠ 必須在 keeper_start 之前抓 log 尾巴：keeper_start 用 "w" 開**同一個**
+            # keeper.log（截斷），之後再讀只會拿到空字串——這就是為什麼 log_tail
+            # 加了兩輪卻一直是空的（9/26 定案）。
+            _tail = _keeper_log_tail(i)
             _ok = keeper_start(nodes, i)
             KEEPER_FAILS.setdefault(i, {}).update({"life": None})
             hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
@@ -621,7 +625,7 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
                        step=str(_prev.get("step") or "")[:24],
                        refresh_n=_prev.get("refresh_n"),
                        refresh_hits=_prev.get("refresh_hits"),
-                       log_tail=_keeper_log_tail(i),
+                       log_tail=_tail,
                        up=int(age), fails=KEEPER_FAILS.get(i, {}).get("n", 0),
                        restarted=bool(_ok))
             if _ok:
@@ -645,10 +649,12 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
                 proc.kill()
             except Exception:
                 pass
+            _tail = _keeper_log_tail(i)      # 同 dead 分支：start 會截斷 log
             _ok = keeper_start(nodes, i)
             hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
                        state="build-timeout", prev=str((st or {}).get("state") or ""),
                        reason=str((st or {}).get("reason") or "")[:70],
+                       log_tail=_tail,
                        up=int(age), restarted=bool(_ok))
             if _ok:
                 n += 1
