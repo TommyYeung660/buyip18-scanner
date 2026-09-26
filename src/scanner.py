@@ -486,7 +486,14 @@ KEEPER_REFRESH_SENT = {}
 # 重複／過期的命令一律吃掉忽略 ⇒ 結構上不可能再用同一則命令把 keeper 推進
 # 「下一輪換 session」而 exit 43（整夜 31 次 refresh-exhausted 的機制）。
 KEEPER_REFRESH_N = {}
-REFRESH_TIMEOUT_S = 180
+# ⚡ 9/27 實測修正：原地換 session 實際需要 185-201 秒（10 次逾時的間隔全部落在
+# 185-201，也就是**每一次都差幾秒被殺掉**），而舊門檻是 180 ⇒ 8 小時內 96 次換
+# session 有 10 次被逾時殺掉重建（每次賠一個 2-4 分鐘冷啟，而那個重建做的事跟換
+# session 完全一樣）。成因是我 9/26 把入袋重試 6→10 輪（便宜輪 7）——那修好了「袋
+# 內實際 0 項」的死亡，但讓換 session 的填袋變長，剛好頂破 180 秒。
+# ⇒ 門檻放寬到 300 秒（留 50% 餘裕）；仍受建袋看門狗 420 秒與其他自癒路徑約束，
+# 所以「真的卡死」的 slot 不會無限不被處理。env 可調（KEEPER_REFRESH_TIMEOUT_S）。
+REFRESH_TIMEOUT_S = int(os.environ.get("KEEPER_REFRESH_TIMEOUT_S", "300"))
 # 原地換 session 成功的時刻（slot -> ts）。⛔ 9/25 實證明確：refresh 是**同一個進程**
 # 的工作，不會更新 KEEPER_LASTSTART ⇒ 若不另外記「最近一次換 session」，slot 的齡
 # 永遠 > 門檻 ⇒ 掃描器每一輪都再發一次 refresh（實測 slot2 在 100 秒內被發 5 次、
