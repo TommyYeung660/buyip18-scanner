@@ -910,11 +910,23 @@ def main():
             hits = sweep_once(nodes)
             if time.time() - _hb_last[0] > HB_S:
                 _hb_last[0] = time.time()
+                # ⚡ 9/27：順便把「每個 slot 目前停在哪一間店」寫進心跳。
+                # 為什麼需要：停泊的建立與存活本來只出現在 status/latest.json 那份**會被
+                # 覆蓋**的快照裡（帳本只有零星幾筆 park_*），於是「停泊何時建好、有沒有被
+                # 清掉」無法事後回查——而停泊正是命中鏈唯一能進 1-10 秒窗口的路。
+                # 這裡複用 keeper_slots_view()（已產生 "ready@R499" 這種字串），一次拿到
+                # 全艦隊的停泊狀態；失敗就留空，不影響心跳。
+                try:
+                    _pv = ",".join("%s:%s" % (k, v) for k, v in
+                                   sorted((keeper_slots_view()[0] or {}).items()))[:120]
+                except Exception:
+                    _pv = ""
                 hit_ledger(event="sweep", nodes_total=len(nodes),
                            nodes_dead=sum(1 for n in nodes
                                           if node_dead.get(n, 0) > time.time()),
                            nodes_strike=sum(1 for n in nodes if node_strikes.get(n)),
-                           hits_in_round=len(hits), cur_node=mask(_cur_node) if _cur_node else "")
+                           hits_in_round=len(hits), cur_node=mask(_cur_node) if _cur_node else "",
+                           parks=_pv)
                 try:
                     push_hits_ledger()      # 心跳要即時可見，不等命中
                 except Exception:
