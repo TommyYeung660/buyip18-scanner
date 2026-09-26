@@ -193,7 +193,21 @@ jobs:
           # 預設值一旦被改，這裡會靜默變成真正的下單路徑。
           # 這些變數會被 keeper 子進程繼承（scanner.py 的 env=dict(os.environ,…)），
           # 所以 keeper 引擎（另 clone 的 buyip18-checkout）看得到。
-          KEEPER_PARK_STORE: "0"
+          # ⚡ 9/26 晚（用戶指示「按建議去做」）：**重啟停泊做一次有界驗證**。
+          # 為什麼現在值得重驗：9/23 否證前提 1 的那一發（park_survived=false）是在
+          # 舊環境量的（當時還有 6 slot、導航鏈在跑、keeper 每 ~57 分自殺）。
+          # 9/26 已修掉兩件會污染量測的事：① 重試預算被成功換 session 吃掉（keeper 每
+          # 57 分必定 exit 43 ⇒ 停泊常被重建清掉）② 快驗白花 5.9 秒且把第一發墊成 8.3 秒。
+          # 今日 5 發命中的逐步數據顯示：鏈＝(POST 數−1)×10 秒（3 個 POST ⇒ 20.6 秒），
+          # 窗口只有 1-10 秒 ⇒ **停泊（只剩 placeOrder 一個 POST）是唯一能進窗口的路**。
+          # 本輪範圍刻意有界：只驗「前提 1：停泊狀態能否活過額度消失」，判準＝帳本
+          # `park_survived=true`（＝命中時站方仍認得停泊店），外加 `park_try`/`park_fail`
+          # 診斷停泊本身成敗。停泊命令由命中後的 `keeper_fire_park()` 自動發出（只能趁
+          # 剛出過貨的視窗建立，這是設計上的限制，不是缺陷）。
+          # ⛔ KEEPER_PARK_SHADOW 必須保持 "1"：快路徑的條件是
+          #    `PARK_ENABLED and parked==hit and not PARK_SHADOW`
+          # ⇒ SHADOW=1 時**永不**走快路徑，下單行為與現在逐字相同（零下單風險）。
+          KEEPER_PARK_STORE: "1"
           KEEPER_PARK_SHADOW: "1"
           # 導航鏈（9/22 實測，見 work/latency-repro/FINDINGS.md + nav_chain_cost.py）：
           # checkoutx POST 的 10 秒節流是**伺服器端、以頁面檢視為單位**的閘，
