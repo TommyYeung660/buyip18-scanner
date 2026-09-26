@@ -424,10 +424,22 @@ def keeper_start(nodes, slot):
         except Exception:
             pass
     sku = KEEPER_FLEET[slot]
+    # keeper 跑的是哪個引擎 SHA：本專案被「引擎每 run 只 clone 一次」坑過（keeper
+    # 拿到的 checkout 是**該 run 首次 clone** 的那份，不是最新 main）⇒ 部署驗收時
+    # 「改動到底進去了沒」只能靠推論。把 SHA 寫進 keeper env，再由 checkout 寫進
+    # state.json ⇒ 帳本/狀態檔一眼可見（純觀測，不改任何行為）。
+    _esha = ""
+    try:
+        _r = subprocess.run(["git", "-C", eng, "rev-parse", "--short", "HEAD"],
+                            capture_output=True, text=True, timeout=10)
+        _esha = (_r.stdout or "").strip()[:12]
+    except Exception:
+        pass
     env = dict(os.environ, SKU=sku, KEEPER="1", KEEPER_SKUS=sku,
                KEEPER_STATE=state_p, KEEPER_CMD=cmd_p,
                PROFILE=keeper_profile(slot), DRY_RUN="", ADD_MODE="http",
                PROXY_PORT=str(keeper_port(slot)), DISPLAY=":99", RUN_URL="",
+               ENGINE_SHA=_esha,
                VNC_URL=os.environ.get("VNC_URL", ""),
                VNC_PW=(os.environ.get("VNC_PW")
                        or (open("/tmp/vncpw").read().strip()
