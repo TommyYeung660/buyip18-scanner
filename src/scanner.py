@@ -430,7 +430,11 @@ def keeper_start(nodes, slot):
     # state.json ⇒ 帳本/狀態檔一眼可見（純觀測，不改任何行為）。
     _esha = ""
     try:
-        _r = subprocess.run(["git", "-C", eng, "rev-parse", "--short", "HEAD"],
+        # ⚠ GitHub runner 上 /tmp 不在 git 的 safe.directory ⇒ 直接 rev-parse 會被
+        # 「detected dubious ownership」擋掉（exit 128、_esha 空 ⇒ state 也就沒有 engine
+        # 欄位，這正是 9/26 看到 engine=None 的原因）。用 -c safe.directory=* 放行。
+        _r = subprocess.run(["git", "-c", "safe.directory=*", "-C", eng,
+                             "rev-parse", "--short", "HEAD"],
                             capture_output=True, text=True, timeout=10)
         _esha = (_r.stdout or "").strip()[:12]
     except Exception:
