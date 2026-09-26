@@ -435,6 +435,7 @@ def keeper_start(nodes, slot):
         _esha = (_r.stdout or "").strip()[:12]
     except Exception:
         pass
+    log("keeper%d 引擎 SHA=%s" % (slot, _esha or "(取不到)"))
     env = dict(os.environ, SKU=sku, KEEPER="1", KEEPER_SKUS=sku,
                KEEPER_STATE=state_p, KEEPER_CMD=cmd_p,
                PROFILE=keeper_profile(slot), DRY_RUN="", ADD_MODE="http",
