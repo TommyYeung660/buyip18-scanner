@@ -493,7 +493,11 @@ KEEPER_REFRESH_N = {}
 # 內實際 0 項」的死亡，但讓換 session 的填袋變長，剛好頂破 180 秒。
 # ⇒ 門檻放寬到 300 秒（留 50% 餘裕）；仍受建袋看門狗 420 秒與其他自癒路徑約束，
 # 所以「真的卡死」的 slot 不會無限不被處理。env 可調（KEEPER_REFRESH_TIMEOUT_S）。
-REFRESH_TIMEOUT_S = int(os.environ.get("KEEPER_REFRESH_TIMEOUT_S", "300"))
+# ⚡ 9/28：300 → 420 秒。因為換 session 之後多了一步「原地重新停泊同一間店」
+# （2-3 個 POST、每個間隔 PARK_GAP_S≈11 秒 ⇒ 最多再 +35 秒），實測換 session 本體
+# 185-201 秒 ⇒ 上限 240 秒上下。420 秒與建袋看門狗同界（而看門狗會跳過換 session
+# 在途的 slot），所以這是自然的另一個邊界，不會讓卡死的 slot 無人處理。
+REFRESH_TIMEOUT_S = int(os.environ.get("KEEPER_REFRESH_TIMEOUT_S", "420"))
 # 原地換 session 成功的時刻（slot -> ts）。⛔ 9/25 實證明確：refresh 是**同一個進程**
 # 的工作，不會更新 KEEPER_LASTSTART ⇒ 若不另外記「最近一次換 session」，slot 的齡
 # 永遠 > 門檻 ⇒ 掃描器每一輪都再發一次 refresh（實測 slot2 在 100 秒內被發 5 次、
