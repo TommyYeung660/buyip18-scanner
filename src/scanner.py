@@ -27,21 +27,25 @@ PER_NODE_GAP_S = 15                 # 每節點兩次請求的最小間距（共
 NODE_COOLDOWN_S = 900               # 節點單次失敗的冷卻秒數（15 分）
 NODE_MAX_STRIKES = 3                # 累計失敗達此數 → 三振出局（該 job 內不再使用）
 # ── 低水位復健（9/29 新增）────────────────────────────────────────────
-# 為什麼：三振出局設的是 `node_dead = now + 86400`，而 job 只有 320 分鐘 ⇒ **一個 job
-# 內等於永久出局**；免費池又會隨時恢復（541 是機率閘、瞬斷也會自己好）。結果池只會
-# 單調衰減、收斂到 0＝掃描全盲，而偵測是搶購鏈的第一環。
-# 9/29 實測（同一 run，02:06 起）：dead 3 → 78(06:11) → 84(06:26) → **95(06:41)／
-# dirty alive 7**；吞吐上限＝alive/PER_NODE_GAP_S＝7/15＝0.47 req/s，已低於掃描器自然
-# 需求（~0.6-1.0 req/s）⇒ **偵測被自己的節點池綁死**，而 07:00-09:00 是 82% 命中的時段。
-# 舊的復活路徑（全部節點失效時 `node_dead.clear()`）**其實是 no-op**：pick_node 過濾的是
-# `node_strikes < NODE_MAX_STRIKES`，清冷卻但保留三振次數 ⇒ 節點永遠回不來（註解寫
-# 「三振次數保留」像是有意，但與過濾條件合起來就是永久死亡）。
-# 修法＝只在**低水位**時、以**有界批量**把最久沒試過的三振節點放回（成本上限 12 次
-# mihomo 切換/20 分）；健康池（存活 > 25%）完全不觸發＝行為逐字不變。
+# 為什麼：節點池的兩種「死亡」都可能自己好（541 是機率閘、瞬斷與供應商抖動也會恢復），
+# 但本 run 的懲罰太長：冷卻 15 分、三振出局 86400 秒（job 只有 320 分 ⇒ 等於永久）。
+# 9/29 實測（同一 run，02:06 起）：dead 3 → 78(06:11) → 84(06:26) → **95／alive 7(06:41)**；
+# 吞吐上限＝alive/PER_NODE_GAP_S＝7/15＝0.47 req/s，已低於自然需求（~0.6-1.0）⇒ 偵測被
+# 自己的節點池綁死。而 **06:56 又回到 dead 14／alive 88** —— 復活是那條緊急路徑做的
+# （`全部節點失效` → `node_dead.clear()`），證明：
+#   ①池的「死亡」以**冷卻**為主（大量節點同刻失敗＝外部事件），不是三振
+#   ②但緊急路徑要等到 **alive=0** 才觸發，之後還 `sleep(600)`＝**整整 10 分鐘不掃**，
+#     那 10 分鐘正好在 82% 命中的時段裡。
+#   （更正我在 9/29 06:45 的說法：`node_dead.clear()` 只對「≥3 振」的節點是 no-op，
+#    對冷卻中的節點仍有效——這點由上面 7→88 的實證推翻。）
+# 修法＝**不必等全盲**：存活率 < NODE_REHAB_BELOW 時，每 NODE_REHAB_EVERY_S 把
+# **最久沒試過的 NODE_REHAB_BATCH 個**（冷卻中＋三振的都算）放回 ⇒ 復原延遲從「撞到 0
+# ＋600 秒」變成「最多一個節奏週期」，成本有界（每批 ≈12 次 mihomo 切換＋請求）。
+# 健康池（存活 > 25%）完全不觸發＝行為逐字不變。
 # ⚠ 只動 mihomo 的 `SCAN` 組（/proxies/SCAN）＝掃描器自己的 7890；keeper 的 7891／
 # 7892+i 是獨立 listener，**復健不會擾動武裝中的艦隊**。
 NODE_REHAB_BELOW = 0.25             # 存活率低於此＝啟動復健
-NODE_REHAB_EVERY_S = 1200           # 復健節奏（20 分）
+NODE_REHAB_EVERY_S = 600            # 復健節奏（10 分；遠短於緊急路徑的 600 秒純睡）
 NODE_REHAB_BATCH = 12               # 每批放回幾個（成本有界）
 SWEEP_PAUSE = (2.0, 4.0)            # 每輪掃描間的基礎停頓
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "320"))
@@ -69,11 +73,12 @@ NODE_REHAB_TOTAL = [0]              # 本 run 累計放回幾個節點（寫進�
 
 
 def node_rehab(nodes, force=False, now=None):
-    """低水位復健：把三振出局的節點放回來（見上面 NODE_REHAB_* 的理由）。
+    """低水位復健：把「冷卻中」與「三振出局」的節點放回來（見上面 NODE_REHAB_* 的理由）。
 
     - 非 force：只在「存活率 < NODE_REHAB_BELOW」且距上次 ≥ NODE_REHAB_EVERY_S 時，
-      放回 NODE_REHAB_BATCH 個（最久沒被試過的優先＝node_dead 到期時間最早者）。
-    - force=True：全池失效的復活路徑專用，一次放回全部（否則清冷卻也是 no-op）。
+      放回 NODE_REHAB_BATCH 個**最久沒試過的**（node_dead 到期時間最早者優先；
+      冷卻中與三振者同列候選，因為 9/29 實證池的死亡以冷卻為主）。
+    - force=True：全池失效的復活路徑專用，一次全部放回。
     回傳實際放回幾個；0＝未觸發（健康池的行為逐字不變）。
     """
     now = time.time() if now is None else now
@@ -84,17 +89,25 @@ def node_rehab(nodes, force=False, now=None):
             return 0
         if now - _last_rehab[0] < NODE_REHAB_EVERY_S:
             return 0
-    struck = [n for n in nodes if node_strikes.get(n, 0) >= NODE_MAX_STRIKES]
-    batch = len(struck) if force else NODE_REHAB_BATCH
-    cand = sorted(struck, key=lambda n: node_dead.get(n, 0))[:batch]
+    # 候選＝所有「目前選不到」的節點：冷卻中（strikes 1-2）＋三振出局（strikes ≥3）。
+    # 兩個類別一起排隊＝復健不必等緊急路徑（alive=0 → sleep 600s）才有動作。
+    cand_all = [n for n in nodes
+                if node_dead.get(n, 0) > now or node_strikes.get(n, 0) >= NODE_MAX_STRIKES]
+    batch = len(cand_all) if force else NODE_REHAB_BATCH
+    cand = sorted(cand_all, key=lambda n: (
+        node_strikes.get(n, 0) >= NODE_MAX_STRIKES,      # 先放冷卻中的（便宜、大機率活）
+        node_dead.get(n, 0)))[:batch]                    # 再按最久沒試過排序
+    _n_struck = sum(1 for n in cand if node_strikes.get(n, 0) >= NODE_MAX_STRIKES)
     for n in cand:
-        node_strikes[n] = 0
-        node_dead.pop(n, None)
+        node_dead.pop(n, None)                           # 清冷卻
+        if node_strikes.get(n, 0) >= NODE_MAX_STRIKES:
+            node_strikes[n] = 0                          # 三振者給第二次機會
     _last_rehab[0] = now
     NODE_REHAB_TOTAL[0] += len(cand)
     if cand:
-        log("節點復健：存活 %d/%d（%s）— 放回 %d 個三振節點"
-            % (len(alive), len(nodes), "全池失效" if force else "低水位", len(cand)))
+        log("節點復健：存活 %d/%d（%s）— 放回 %d 個（冷卻 %d、三振 %d）"
+            % (len(alive), len(nodes), "全池失效" if force else "低水位", len(cand),
+               len(cand) - _n_struck, _n_struck))
     return len(cand)
 
 
