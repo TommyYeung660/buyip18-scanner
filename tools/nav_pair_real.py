@@ -241,6 +241,46 @@ def main():
             bag=n, url=page.url[:120], ua=os.environ.get("UA_ARM", "safari"),
             guest_clicks=_guest_clicks)
 
+        # ---- MODE=bagdetect：入袋「偵測 vs 袋子實際件數」（診斷 `http200 仍無結帳標記`）----
+        # 為什麼要問：fill_bag 的失敗子原因偶爾出現 `fetch=http200 … 仍無結帳標記`
+        # ——HTTP 成功卻找不到加入購物袋的標記。這可能是 (a) 加購真的沒生效，或
+        # (b) **偵測條件過時**（成功的加購被算成失敗 ⇒ 白燒輪數、甚至重複加購）。
+        # 分辨方法：每次 add_to_bag 前後各讀一次**真實袋子件數**（bag_count），
+        # 若「偵測說失敗」但袋子件數增加了 ⇒ 就是偵測缺口。全程唯讀、不結帳、不下單。
+        if os.environ.get("MODE") == "bagdetect":
+            log("=== bagdetect：偵測 vs 真實袋數 ===")
+            _cand = ["6.9", "布根地紅色", "256GB"]
+            n_ok = n_gap = n_att = 0
+            for i in range(1, 7):
+                try:
+                    page.goto(C.PRODUCT_URL, wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(1500)
+                except Exception as e:
+                    log("  第%d次：重載失敗 %s" % (i, repr(e)[:40])); continue
+                before = C.bag_count(page)
+                ok = False
+                try:
+                    ok = bool(C.add_to_bag(page, ctx, _cand))
+                except Exception as e:
+                    log("  第%d次：add_to_bag 例外 %s" % (i, repr(e)[:60]))
+                after = C.bag_count(page)
+                n_att += 1
+                if ok:
+                    n_ok += 1
+                grew = (isinstance(before, int) and isinstance(after, int)
+                        and before >= 0 and after > before)
+                if (not ok) and grew:
+                    n_gap += 1
+                log("  第%d次：偵測 ok=%s｜袋子 %s→%s %s"
+                    % (i, ok, before, after, "★偵測缺口（失敗但袋真的變多）" if
+                       ((not ok) and grew) else ""))
+                rec(phase="bagdetect", i=i, detect_ok=ok, before=before, after=after,
+                    grew=grew, gap=bool((not ok) and grew))
+                time.sleep(4)
+            log("=== 結論：%d 次嘗試、偵測成功 %d、**偵測缺口 %d** ===" % (n_att, n_ok, n_gap))
+            br.close()
+            return
+
         # ---- MODE=navpair：在**同一個已建立的真實會話**內測「導航是否清閘」----
         # 設計要點（前三次失敗的教訓）：不重建會話、不用個資。
         #   · 量測器＝**生產的選店 POST**（q_store 無 profile 欄位；重送是 no-op 但
