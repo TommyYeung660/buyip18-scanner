@@ -26,6 +26,23 @@ MAX_PARTS = 3                       # pickup-message 上限，>3 會 541
 PER_NODE_GAP_S = 15                 # 每節點兩次請求的最小間距（共享出口禮貌）
 NODE_COOLDOWN_S = 900               # 節點單次失敗的冷卻秒數（15 分）
 NODE_MAX_STRIKES = 3                # 累計失敗達此數 → 三振出局（該 job 內不再使用）
+# ── 低水位復健（9/29 新增）────────────────────────────────────────────
+# 為什麼：三振出局設的是 `node_dead = now + 86400`，而 job 只有 320 分鐘 ⇒ **一個 job
+# 內等於永久出局**；免費池又會隨時恢復（541 是機率閘、瞬斷也會自己好）。結果池只會
+# 單調衰減、收斂到 0＝掃描全盲，而偵測是搶購鏈的第一環。
+# 9/29 實測（同一 run，02:06 起）：dead 3 → 78(06:11) → 84(06:26) → **95(06:41)／
+# dirty alive 7**；吞吐上限＝alive/PER_NODE_GAP_S＝7/15＝0.47 req/s，已低於掃描器自然
+# 需求（~0.6-1.0 req/s）⇒ **偵測被自己的節點池綁死**，而 07:00-09:00 是 82% 命中的時段。
+# 舊的復活路徑（全部節點失效時 `node_dead.clear()`）**其實是 no-op**：pick_node 過濾的是
+# `node_strikes < NODE_MAX_STRIKES`，清冷卻但保留三振次數 ⇒ 節點永遠回不來（註解寫
+# 「三振次數保留」像是有意，但與過濾條件合起來就是永久死亡）。
+# 修法＝只在**低水位**時、以**有界批量**把最久沒試過的三振節點放回（成本上限 12 次
+# mihomo 切換/20 分）；健康池（存活 > 25%）完全不觸發＝行為逐字不變。
+# ⚠ 只動 mihomo 的 `SCAN` 組（/proxies/SCAN）＝掃描器自己的 7890；keeper 的 7891／
+# 7892+i 是獨立 listener，**復健不會擾動武裝中的艦隊**。
+NODE_REHAB_BELOW = 0.25             # 存活率低於此＝啟動復健
+NODE_REHAB_EVERY_S = 1200           # 復健節奏（20 分）
+NODE_REHAB_BATCH = 12               # 每批放回幾個（成本有界）
 SWEEP_PAUSE = (2.0, 4.0)            # 每輪掃描間的基礎停頓
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "320"))
 # 命中冷卻：同 (SKU, 門市) 在冷卻期內不再處理。
@@ -47,6 +64,38 @@ node_strikes = {}                   # name → 累計失敗次數（三振出局
 # 欄位會變成每 2-3 秒推一次、打爆 GitHub API；帳本 15 分鐘一列＝4 列/小時。
 HB_S = int(os.environ.get("SCANNER_HB_S", "900"))
 _hb_last = [0.0]
+_last_rehab = [0.0]                 # 上次低水位復健時間
+NODE_REHAB_TOTAL = [0]              # 本 run 累計放回幾個節點（寫進心跳供驗收）
+
+
+def node_rehab(nodes, force=False, now=None):
+    """低水位復健：把三振出局的節點放回來（見上面 NODE_REHAB_* 的理由）。
+
+    - 非 force：只在「存活率 < NODE_REHAB_BELOW」且距上次 ≥ NODE_REHAB_EVERY_S 時，
+      放回 NODE_REHAB_BATCH 個（最久沒被試過的優先＝node_dead 到期時間最早者）。
+    - force=True：全池失效的復活路徑專用，一次放回全部（否則清冷卻也是 no-op）。
+    回傳實際放回幾個；0＝未觸發（健康池的行為逐字不變）。
+    """
+    now = time.time() if now is None else now
+    alive = [n for n in nodes
+             if node_dead.get(n, 0) <= now and node_strikes.get(n, 0) < NODE_MAX_STRIKES]
+    if not force:
+        if len(alive) > max(6, int(NODE_REHAB_BELOW * len(nodes))):
+            return 0
+        if now - _last_rehab[0] < NODE_REHAB_EVERY_S:
+            return 0
+    struck = [n for n in nodes if node_strikes.get(n, 0) >= NODE_MAX_STRIKES]
+    batch = len(struck) if force else NODE_REHAB_BATCH
+    cand = sorted(struck, key=lambda n: node_dead.get(n, 0))[:batch]
+    for n in cand:
+        node_strikes[n] = 0
+        node_dead.pop(n, None)
+    _last_rehab[0] = now
+    NODE_REHAB_TOTAL[0] += len(cand)
+    if cand:
+        log("節點復健：存活 %d/%d（%s）— 放回 %d 個三振節點"
+            % (len(alive), len(nodes), "全池失效" if force else "低水位", len(cand)))
+    return len(cand)
 
 
 def mask(name):
@@ -979,6 +1028,10 @@ def main():
             # 讓整隊同刻重建；這裡在失明前逐個退掉，天然錯開。
             keeper_recycle_old(nodes, int(os.environ.get("KEEPER_RECYCLE_S", "0")))
         try:
+            node_rehab(nodes)       # 低水位復健：只在存活 <25% 時、每 20 分放回一批
+        except Exception:
+            pass
+        try:
             hits = sweep_once(nodes)
             if time.time() - _hb_last[0] > HB_S:
                 _hb_last[0] = time.time()
@@ -997,6 +1050,7 @@ def main():
                            nodes_dead=sum(1 for n in nodes
                                           if node_dead.get(n, 0) > time.time()),
                            nodes_strike=sum(1 for n in nodes if node_strikes.get(n)),
+                           nodes_rehab=NODE_REHAB_TOTAL[0],
                            hits_in_round=len(hits), cur_node=mask(_cur_node) if _cur_node else "",
                            parks=_pv)
                 try:
@@ -1005,7 +1059,9 @@ def main():
                     pass
         except RuntimeError as e:
             log("全部節點失效，10 分鐘後重試: %s" % e)
-            node_dead.clear()  # 清冷卻讓節點復活（三振次數保留）
+            # 只清冷卻＝no-op（pick_node 用 node_strikes 過濾，三振者永遠選不到）
+            # ⇒ 必須連三振次數一起放回，否則這段「復活」其實是永久失明。
+            node_rehab(nodes, force=True)
             time.sleep(600)
             continue
         if hits:
