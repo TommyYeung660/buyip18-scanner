@@ -198,7 +198,13 @@ def dispatch_checkout(sku, store):
 KEEPER_BASE = "/tmp/keeper"                      # slot 目錄 /tmp/keeper/k{i}/
 KEEPER_ENGINE_BASE = "/tmp/checkout-engine"      # 基礎 clone（各 slot copytree 複製）
 FALLBACK_ENGINE_DIR = "/tmp/checkout-fallback"   # 命中重走的後備引擎（勿與 keeper 共用目錄）
-KEEPER_FLEET = list(PARTS)[:max(1, int(os.environ.get("KEEPER_SLOTS", "6") or 6))]
+# KEEPER_LAYOUT：逐一列出每個 slot 拿哪個 SKU（逗號分隔）。**預設＝舊行為**
+# （每個 SKU 一個 slot）。允許同一 SKU 佔多個 slot ⇒ **可同時停泊多間店**——
+# 快路徑需要「命中店＝停泊店」，而同一 SKU 一天內會在多間店出貨（9/28 的 MJXQ4ZA/A
+# 就在 R610 與 R409 各出一次），一個 SKU 只有一個 slot 時最多只能停一間店。
+_LAYOUT = [x.strip().upper() for x in
+           os.environ.get("KEEPER_LAYOUT", "").split(",") if x.strip()]
+KEEPER_FLEET = _LAYOUT or list(PARTS)[:max(1, int(os.environ.get("KEEPER_SLOTS", "6") or 6))]
 # 「武裝待命」的狀態字串。keeper 端現在統一寫 "ready"（停泊資訊走 park_store
 # 正交欄位），這裡仍寬容接受 "parked"：狀態字串是跨檔案的契約，舊/新引擎混用
 # 時若漏認，slot 會靜默退出派工並被建袋看門狗殺掉重開——代價太大，不值得省這行。
@@ -248,11 +254,62 @@ def keeper_state(i):
         return None
 
 
-def keeper_slot_for(sku):
+def keeper_slot_for(sku, store_code=""):
+    """挑一個持有該 SKU 的 slot 派工。同一 SKU 有多個 slot 時（KEEPER_LAYOUT）：
+
+    ① 優先「**停泊在命中店**且武裝」的 slot——那條會走快路徑（只送 placeOrder，~0.5 秒）；
+    ② 其次任一武裝的該 SKU slot（優先有停泊者，袋與會話都最就緒）；
+    ③ 都沒有武裝就回第一個該 SKU 的 slot（呼叫端會因此走本地/派工後備，與舊行為一致）。
+    """
     s = (sku or "").strip().upper()
-    for i, p in enumerate(KEEPER_FLEET):
-        if p.upper() == s:
+    code = (store_code or "").strip().upper()
+    cands = [i for i, p in enumerate(KEEPER_FLEET) if p.upper() == s]
+    if not cands:
+        return None
+    armed, parked = [], []
+    for i in cands:
+        st = keeper_state(i) or {}
+        if st.get("state") in KEEPER_ARMED:
+            armed.append(i)
+            pk = str(st.get("park_store") or "").strip().upper()
+            if pk:
+                parked.append((i, pk))
+    for i, pk in parked:
+        if code and pk == code:
             return i
+    if parked:
+        return parked[0][0]
+    if armed:
+        return armed[0]
+    return cands[0]
+
+
+def keeper_park_slot_for(sku, store_code=""):
+    """挑一個「該去停泊」的 slot。**優先未停泊者**——這樣既有停泊不會被覆蓋掉，
+    同一 SKU 的多個 slot 就能分別停在不同店（覆蓋率翻倍）。
+    若全部都已有停泊，才退回「剛做完這一發買入的 slot」由呼叫端處理。
+    回 None ＝沒有合適的 slot（呼叫端沿用原本的 slot）。"""
+    s = (sku or "").strip().upper()
+    code = (store_code or "").strip().upper()
+    cands = [i for i, p in enumerate(KEEPER_FLEET) if p.upper() == s]
+    free, other, same = [], [], []
+    for i in cands:
+        st = keeper_state(i) or {}
+        if st.get("state") not in KEEPER_ARMED:
+            continue
+        pk = str(st.get("park_store") or "").strip().upper()
+        if not pk:
+            free.append(i)
+        elif pk != code:
+            other.append(i)
+        else:
+            same.append(i)          # 已停在同一間店（重停無害）
+    if free:
+        return free[0]
+    if other:
+        return other[0]
+    if same:
+        return same[0]
     return None
 
 
@@ -977,7 +1034,7 @@ def main():
                  "%s @ %s — 自動下單已觸發" % (sku, detail[:60]), priority=2)
             # 優先序：命中 SKU 的專屬 keeper slot（秒級）→ 本地結帳（~60-90s）→ 派工（~3 分）
             if keeper_on:
-                slot = keeper_slot_for(sku)
+                slot = keeper_slot_for(sku, store_code)
                 st = keeper_state(slot) if slot is not None else None
                 # 不等預熱：slot 未就緒（狀態 None=建袋中/剛崩）即走本地引擎——
                 # 100 秒乾等只會把命中→下單拖成 160+ 秒（9/19 晨 #18/#19 敗因）；
@@ -1015,7 +1072,15 @@ def main():
                     if os.environ.get("KEEPER_PARK_STORE", "0").strip() == "1" \
                             and store_code:
                         try:
-                            keeper_fire_park(slot, store_code, store)
+                            # 優先叫「尚未停泊」的同 SKU slot 去停這間店 ⇒ 既有停泊
+                            # （別間店）不會被覆蓋，同 SKU 就能同時停多間店。
+                            _pslot = keeper_park_slot_for(sku, store_code)
+                            if _pslot is None:
+                                _pslot = slot
+                            if _pslot != slot:
+                                log("停泊改由 slot%d 接手（slot%d 已有停泊或未武裝）"
+                                    % (_pslot, slot))
+                            keeper_fire_park(_pslot, store_code, store)
                         except Exception as _e:
                             log("停泊命令失敗: " + repr(_e)[:60])
                     bark("iPhone 18 下單結果",

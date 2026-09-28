@@ -218,6 +218,15 @@ jobs:
           # 完整鏈（不會卡死）、命令檔為原子認領（跨進程不重複消費）、`buying` 狀態
           # 擋住重建期重播。
           # ⛔ 回退方式：把本行改回 "1"（即可回到「只記錄、不下單」的影子模式）。
+
+          KEEPER_SLOTS: "6"
+          # ⚡ 9/28 第 1 項：同一 SKU 多 slot ⇒ **可同時停泊多間店**。
+          # 快路徑需「命中店＝停泊店」，而同一 SKU 一天會在多間店出貨
+          # （9/28 的 MJXQ4ZA/A 就在 R610 與 R409 各出一次）。
+          # 今日出貨最多的兩個 SKU（紅256、紅512）各給 2 個 slot，
+          # 黑256/黑512 各 1 個 ⇒ 6 slot（IPRoyal 專屬出口前 5 個 + slot5 家寬）。
+          # per-slot 出口由 SLOT_PROXIES_JSON 決定；更換佈局只要改這行。
+          KEEPER_LAYOUT: "MJXQ4ZA/A,MJXQ4ZA/A,MJXV4ZA/A,MJXV4ZA/A,MJXN4ZA/A,MJXT4ZA/A"
           KEEPER_PARK_STORE: "1"
           KEEPER_PARK_SHADOW: "0"
           # 導航鏈（9/22 實測，見 work/latency-repro/FINDINGS.md + nav_chain_cost.py）：
