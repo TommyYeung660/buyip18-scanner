@@ -408,7 +408,7 @@ def keeper_ready_count():
     return n
 
 
-def keeper_start(nodes, slot):
+def keeper_start(nodes, slot, alt_exit=False):
     """啟動第 slot 個駐場引擎（純袋 = KEEPER_FLEET[slot]）。回傳 True=已起。
 
     ⛔ 啟動前**必須**確認舊進程已死（見下方 guard）。一個 slot 同時有兩個 keeper
@@ -500,7 +500,13 @@ def keeper_start(nodes, slot):
     env = dict(os.environ, SKU=sku, KEEPER="1", KEEPER_SKUS=sku,
                KEEPER_STATE=state_p, KEEPER_CMD=cmd_p,
                PROFILE=keeper_profile(slot), DRY_RUN="", ADD_MODE="http",
-               PROXY_PORT=str(keeper_port(slot)), DISPLAY=":99", RUN_URL="",
+               # ⚡ 9/28 第 2 項：`alt_exit=True` 時這次開機改走**免費 BUY 池（7891）**
+               # 而不是 slot 的專屬出口。用途＝入袋用盡（exit 3）後的重建——
+               # 541 是機率閘且綁「出口 × 時間窗」，同一個被擋的出口立刻重開往往再撞
+               # 一次（實測常見 backoff 後 2.5 分鐘又死）；換一個出口＝換一個風險桶。
+               # 只在「上一次死亡是 exit 3」時啟用，之後自然回到專屬出口。
+               PROXY_PORT=str(7891 if alt_exit else keeper_port(slot)),
+               DISPLAY=":99", RUN_URL="",
                ENGINE_SHA=_esha,
                VNC_URL=os.environ.get("VNC_URL", ""),
                VNC_PW=(os.environ.get("VNC_PW")
@@ -686,7 +692,11 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
             # keeper.log（截斷），之後再讀只會拿到空字串——這就是為什麼 log_tail
             # 加了兩輪卻一直是空的（9/26 定案）。
             _tail = _keeper_log_tail(i)
-            _ok = keeper_start(nodes, i)
+            # 入袋用盡（引擎的 sys.exit(3) 全部集中在 fill_bag）⇒ 換出口再重建
+            _alt = (proc.returncode == 3)
+            if _alt:
+                log("keeper%d 上次死於入袋用盡（exit 3）⇒ 換 BUY 池出口重建" % i)
+            _ok = keeper_start(nodes, i, alt_exit=_alt)
             KEEPER_FAILS.setdefault(i, {}).update({"life": None})
             hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
                        state="dead", exit=proc.returncode,
@@ -695,6 +705,7 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
                        # 死在換 session 的哪一步（checkout 的 _kwrite step）與 stdout 尾巴：
                        # 沒有這兩個欄位，refresh-exhausted 這種「用盡」型終態無法歸因。
                        step=str(_prev.get("step") or "")[:24],
+                       alt_exit=bool(_alt),
                        refresh_n=_prev.get("refresh_n"),
                        refresh_hits=_prev.get("refresh_hits"),
                        log_tail=_tail,
