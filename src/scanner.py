@@ -1262,13 +1262,42 @@ def push_hits_ledger():
                         d.get("sku", ""), d.get("store", ""))
             except Exception:
                 return l
+        # ⚠ 9/29 06:0x 實測（本機兩個 token 都一樣）：帳本已 1,112,493 bytes > 1 MB
+        # ⇒ Contents API 用 JSON media type 會回 `content: ""`＋`encoding: "none"`，
+        # **不是錯誤、也不會拋例外** ⇒ 舊寫法等於 base=""，把「只有本地幾行」的內容
+        # 寫回去＝**覆寫掉整個帳本歷史**（9 天 5,600+ 行的命中史，全項目的唯一權威）。
+        # 為什麼至今沒爆：keeper／後備的引擎 clone 是 `git clone` 進來的，天然帶著
+        # repo 版的 status/hits.jsonl（下面的 lines 會把那份整份讀進來）＝**靠運氣**，
+        # 不是靠設計（任何一次 clone 缺失／失敗，歷史就沒了）。
+        # 修法＝①改用 raw media type（>1 MB 的正解）②「遠端明明有內容卻讀不回」時
+        # **拒絕推送**——寧可延後一輪，不可覆寫歷史（本專案反覆吃過「安靜的 0」）。
         base = ""
         try:
-            req = urllib.request.Request(LEDGER_API, headers=heads)
-            with urllib.request.urlopen(req, timeout=15) as r:
-                base = base64.b64decode(json.loads(r.read())["content"]).decode()
-        except Exception:
-            base = ""  # 404=帳本未建
+            req = urllib.request.Request(
+                LEDGER_API, headers=dict(heads, **{
+                    "Accept": "application/vnd.github.raw"}))
+            with urllib.request.urlopen(req, timeout=20) as r:
+                base = r.read().decode("utf-8", "replace")
+        except Exception as e:
+            if getattr(e, "code", None) == 404:
+                base = ""                       # 帳本尚未建立＝正常（首次）
+            else:
+                log("hits 帳本：讀不到遠端底稿（%s）— 本輪不推（避免覆寫歷史）"
+                    % repr(e)[:60])
+                return False
+        if not base.strip():
+            # raw 回 200 但內容空＝遠端檔案真的是空的（新檔）或讀不到。用 metadata
+            # 的 size 分辨：size > 0 ⇒ 讀不到，這一輪絕不推。
+            try:
+                req = urllib.request.Request(LEDGER_API, headers=heads)
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    _sz = int(json.loads(r.read()).get("size") or 0)
+            except Exception:
+                _sz = 0
+            if _sz:
+                log("hits 帳本：遠端底稿讀回空（size=%d）— 本輪不推（避免覆寫歷史）"
+                    % _sz)
+                return False
         merged, seen = [], set()
         for x in base.splitlines() + lines:
             k = _k(x)
