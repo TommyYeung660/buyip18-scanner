@@ -207,8 +207,19 @@ jobs:
           # ⛔ KEEPER_PARK_SHADOW 必須保持 "1"：快路徑的條件是
           #    `PARK_ENABLED and parked==hit and not PARK_SHADOW`
           # ⇒ SHADOW=1 時**永不**走快路徑，下單行為與現在逐字相同（零下單風險）。
+          # ⚡ 9/28（用戶「按你的建議去改」＝明確授權）：**啟用快路徑**。
+          # 命中店＝停泊店時只送一個 `placeOrder`（~0.5 秒）——今天三發命中（20.8／20.8／
+          # 29.5 秒）全部敗在「鏈長度 vs 1-10 秒窗口」，而快路徑是唯一能進窗口的形狀。
+          # 四道閘門（皆有測試釘住，見 /tmp/test_fastpath_guard.py）：
+          #   ① KEEPER_PARK_STORE=1  ② 停泊店==命中店  ③ not PARK_SHADOW（本行）
+          #   ④ **DRY_RUN 守門在 placeOrder 之前**（乾跑絕不下單）——與 auto.json 的
+          #      dry_run=false 一起，代表這條路徑會**真的下單**（這是本專案的目的）。
+          # 其他保護：下單成功即清空 PARKED_STORE（同一次停泊不重複觸發）、失敗則退回
+          # 完整鏈（不會卡死）、命令檔為原子認領（跨進程不重複消費）、`buying` 狀態
+          # 擋住重建期重播。
+          # ⛔ 回退方式：把本行改回 "1"（即可回到「只記錄、不下單」的影子模式）。
           KEEPER_PARK_STORE: "1"
-          KEEPER_PARK_SHADOW: "1"
+          KEEPER_PARK_SHADOW: "0"
           # 導航鏈（9/22 實測，見 work/latency-repro/FINDINGS.md + nav_chain_cost.py）：
           # checkoutx POST 的 10 秒節流是**伺服器端、以頁面檢視為單位**的閘，
           # 而一次真正的文件載入會把它清零。∴ 命中鏈每一步改成「導航 + POST」，
