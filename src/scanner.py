@@ -962,6 +962,23 @@ def _mask_secrets(line):
     return t[:300]
 
 
+def order_trace(res):
+    """訂單可追蹤尾巴（給通知用）：`｜SKU｜email｜單號`；非訂單回 ""。
+
+    ⚡ 9/29 用戶要求「下單成功後完整 email 與買到的 SKU 都要可追蹤」：
+    checkout 的 record_order() 把 order_no／order_sku／order_email 寫進 keeper
+    state.json，掃描器再抄進私有帳本＋這條通知尾巴。
+    ⛔ 只給「使用者自己的通知」用；public job log 不印（PII 紀律）。
+    """
+    if not res or res.get("state") != "ordered":
+        return ""
+    bits = [str(res.get("order_sku") or "").strip(),
+            str(res.get("order_email") or "").strip(),
+            str(res.get("order_no") or "").strip()]
+    keep = [b for b in bits if b]
+    return ("｜" + "｜".join(keep)) if keep else ""
+
+
 def pushover(title, body, priority=0):
     """Pushover（Android 主通道）。priority>=2=緊急：每 30 秒重響最長 3 小時直至確認。"""
     token = (os.environ.get("PUSHOVER_TOKEN") or "").strip()
@@ -1146,7 +1163,16 @@ def main():
                                # 是否也吃 GET（若是，保活後 ~10 秒內命中＝第一發必墊 10 秒）。
                                probe_ms=_st0.get("probe_ms"),
                                ka_age_ms=_st0.get("ka_age_ms"),
-                               park_survived=_st0.get("park_survived"))
+                               park_survived=_st0.get("park_survived"),
+                               # ⚡ 9/29 用戶要求「下單成功後完整 email＋SKU 都要可追蹤」：
+                               # keeper 的 state.json 現在帶 order_no／order_sku／order_email／
+                               # order_store（checkout record_order()），這裡逐欄抄進帳本
+                               # （唯一權威）。⛔ 帳本是 private repo ⇒ email 可入帳本；
+                               # 但**絕不印到 stdout/public job log**（PII 紀律）。
+                               order_no=str((res or {}).get("order_no") or "")[:40],
+                               order_sku=str((res or {}).get("order_sku") or "")[:20],
+                               order_email=str((res or {}).get("order_email") or "")[:120],
+                               order_store=str((res or {}).get("order_store") or "")[:8])
                     # 動態停泊：無論這次下單成敗，都趁熱把該店停起來。
                     # 只發命令、不改本次流程——keeper 下單後會自己重建再停泊。
                     if os.environ.get("KEEPER_PARK_STORE", "0").strip() == "1" \
@@ -1164,8 +1190,9 @@ def main():
                         except Exception as _e:
                             log("停泊命令失敗: " + repr(_e)[:60])
                     bark("iPhone 18 下單結果",
-                         "%s %s" % (res.get("state", "?"),
-                                    str(res.get("result", ""))[:60]), priority=1)
+                         "%s %s%s" % (res.get("state", "?"),
+                                      str(res.get("result", ""))[:60],
+                                      order_trace(res)), priority=1)
                     # 只在 keeper 真跑出結帳結果才收工；keeper 失敗落到後備鏈
                     if res and res.get("state") in ("ordered", "declined", "dry-run"):
                         # 只有真的產出結帳結果才收工。marker 讓 Self-resurrect 豁免
