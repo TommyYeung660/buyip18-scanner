@@ -963,18 +963,31 @@ def _mask_secrets(line):
 
 
 def order_trace(res):
-    """訂單可追蹤尾巴（給通知用）：`｜SKU｜email｜單號`；非訂單回 ""。
+    """訂單可追蹤尾巴（給通知用）：`｜SKU｜email｜單號｜店名(店號)｜取貨: 窗口`。
 
-    ⚡ 9/29 用戶要求「下單成功後完整 email 與買到的 SKU 都要可追蹤」：
-    checkout 的 record_order() 把 order_no／order_sku／order_email 寫進 keeper
-    state.json，掃描器再抄進私有帳本＋這條通知尾巴。
+    ⚡ 9/29 用戶要求：下單成功後「完整 email、買到的 SKU、取貨窗口、店名」都要
+    可追蹤，**而且要隨下單成功一起發到 Pushover**。checkout 的 record_order()
+    把 order_no／order_sku／order_email／order_store／order_store_name／order_pickup
+    寫進 keeper state.json，掃描器再抄進私有帳本＋這條通知尾巴。
     ⛔ 只給「使用者自己的通知」用；public job log 不印（PII 紀律）。
     """
     if not res or res.get("state") != "ordered":
         return ""
-    bits = [str(res.get("order_sku") or "").strip(),
-            str(res.get("order_email") or "").strip(),
-            str(res.get("order_no") or "").strip()]
+    no = str(res.get("order_no") or "").strip()
+    sku = str(res.get("order_sku") or "").strip()
+    email = str(res.get("order_email") or "").strip()
+    sname = str(res.get("order_store_name") or "").strip()
+    scode = str(res.get("order_store") or "").strip()
+    pickup = str(res.get("order_pickup") or "").strip()
+    bits = [sku, email, no]
+    if sname and scode:
+        store = "%s(%s)" % (sname, scode)
+    else:
+        store = sname or scode
+    if store:
+        bits.append(store)
+    if pickup:
+        bits.append("取貨: " + pickup)
     keep = [b for b in bits if b]
     return ("｜" + "｜".join(keep)) if keep else ""
 
@@ -1172,7 +1185,12 @@ def main():
                                order_no=str((res or {}).get("order_no") or "")[:40],
                                order_sku=str((res or {}).get("order_sku") or "")[:20],
                                order_email=str((res or {}).get("order_email") or "")[:120],
-                               order_store=str((res or {}).get("order_store") or "")[:8])
+                               order_store=str((res or {}).get("order_store") or "")[:8],
+                               # 9/29 追加（用戶要求）：取貨門市店名與取貨時間窗
+                               order_store_name=str((res or {}).get("order_store_name")
+                                                    or "")[:80],
+                               order_pickup=str((res or {}).get("order_pickup")
+                                                or "")[:80])
                     # 動態停泊：無論這次下單成敗，都趁熱把該店停起來。
                     # 只發命令、不改本次流程——keeper 下單後會自己重建再停泊。
                     if os.environ.get("KEEPER_PARK_STORE", "0").strip() == "1" \
