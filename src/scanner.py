@@ -44,9 +44,13 @@ NODE_MAX_STRIKES = 3                # 累計失敗達此數 → 三振出局（�
 # 健康池（存活 > 25%）完全不觸發＝行為逐字不變。
 # ⚠ 只動 mihomo 的 `SCAN` 組（/proxies/SCAN）＝掃描器自己的 7890；keeper 的 7891／
 # 7892+i 是獨立 listener，**復健不會擾動武裝中的艦隊**。
-NODE_REHAB_BELOW = 0.25             # 存活率低於此＝啟動復健
-NODE_REHAB_EVERY_S = 600            # 復健節奏（10 分；遠短於緊急路徑的 600 秒純睡）
-NODE_REHAB_BATCH = 12               # 每批放回幾個（成本有界）
+NODE_REHAB_BELOW = 0.30             # 存活率低於此＝啟動復健（9/29 用戶核可：更積極）
+NODE_REHAB_EVERY_S = 300            # 復健節奏（5 分；遠短於緊急路徑的 600 秒純睡）
+NODE_REHAB_BATCH = 16               # 每批放回幾個（成本有界）
+# 節點間距自適應（9/29 用戶核可的 (a)）：池縮小時縮短每節點最小間距，
+# 免得「禮貌」變成吞吐天花板（alive/間距 < 掃描器自然需求 0.6-1.0 req/s）。
+SCAN_GAP_FULL_ALIVE = 60            # 存活 ≥ 此數 ⇒ 用原 PER_NODE_GAP_S（行為逐字不變）
+SCAN_GAP_MIN_S = 4                  # 自適應下限（仍留一點禮貌）
 SWEEP_PAUSE = (2.0, 4.0)            # 每輪掃描間的基礎停頓
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "320"))
 # 命中冷卻：同 (SKU, 門市) 在冷卻期內不再處理。
@@ -181,20 +185,39 @@ def poll_sweep():
     return hits
 
 
+def scan_gap_s(nodes, now=None):
+    """每節點最小間距（自適應）：池健康＝PER_NODE_GAP_S（行為逐字不變）；池縮小時線性縮短。
+
+    為什麼（9/29 用戶核可的 (a)）：間距是「對共享出口禮貌」的機制，但它同時是**吞吐
+    天花板**＝alive/間距。9/29 06:41 實測 alive=7 ⇒ 天花板 0.47 req/s，已低於掃描器
+    自然需求（~0.6-1.0）⇒ 偵測被自己的間距綁死（當時正是 82% 命中的時段）。
+    補償只在池小時生效 ⇒ 健康池完全沒有行為改變。
+    """
+    now = time.time() if now is None else now
+    alive = sum(1 for n in nodes
+                if node_dead.get(n, 0) <= now
+                and node_strikes.get(n, 0) < NODE_MAX_STRIKES)
+    if alive >= SCAN_GAP_FULL_ALIVE:
+        return PER_NODE_GAP_S
+    return max(SCAN_GAP_MIN_S,
+               int(PER_NODE_GAP_S * alive / float(SCAN_GAP_FULL_ALIVE)))
+
+
 def pick_node(nodes):
-    """選最久未用且存活的節點（跳過冷卻中／三振出局者）；保證每節點 ≥PER_NODE_GAP_S。"""
+    """選最久未用且存活的節點（跳過冷卻中／三振出局者）；保證每節點 ≥當時間距。"""
     while True:
         alive = [n for n in nodes
                  if node_dead.get(n, 0) <= time.time()
                  and node_strikes.get(n, 0) < NODE_MAX_STRIKES]
         if not alive:
             raise RuntimeError("全部節點失效")
+        _gap_s = scan_gap_s(nodes)
         candidate = min(alive, key=lambda n: node_last_used.get(n, 0))
         gap = time.time() - node_last_used.get(candidate, 0)
-        if gap >= PER_NODE_GAP_S or len(alive) == 1:
+        if gap >= _gap_s or len(alive) == 1:
             node_last_used[candidate] = time.time()
             return candidate
-        time.sleep(min(1.5, PER_NODE_GAP_S - gap))
+        time.sleep(min(1.5, _gap_s - gap))
 
 
 def sweep_once(nodes):
@@ -630,6 +653,12 @@ REFRESH_TIMEOUT_S = int(os.environ.get("KEEPER_REFRESH_TIMEOUT_S", "420"))
 # → exit 43），其他 slot 則因 refresh 名額被佔而等到會話過期。**換 session 必須
 # 等價於「齡歸零」**才能讓這條路徑收斂。
 KEEPER_RENEWED = {}
+# 快速連死的窗口（秒）：9/29 用戶核可——同一 slot 在此窗口內再次死亡，即使上次活得比
+# short_life 久，也要算進退避計數（否則「活 22 分鐘→死→重開→再死」會無限循環）。
+REPEAT_DEATH_S = int(os.environ.get("KEEPER_REPEAT_DEATH_S", "600"))
+# 連續快速死亡達此數 ⇒ 重建時改用 BUY 池出口（不同風險桶）。原本只有 exit 3 才換出口，
+# 但 9/29 07:42-07:44 slot0 以 exit 43／1 連死三次、每次都在同一條專屬出口上重試。
+ALT_EXIT_AFTER_FAILS = int(os.environ.get("KEEPER_ALT_EXIT_AFTER", "2"))
 
 
 def _fleet_armed():
@@ -659,7 +688,7 @@ def keeper_boot_break(i, age, prev, exit_code, short_life=300, base=120, cap=180
     的網路抖動會讓 6 個 slot 一起退避到 30 分鐘，反而比今天更難恢復。
     """
     st = KEEPER_FAILS.setdefault(i, {"n": 0, "until": 0.0, "said": 0,
-                                     "life": None, "seen": 0.0})
+                                     "life": None, "seen": 0.0, "last": 0.0})
     _r = str(prev.get("reason") or "")
     _worked = (_r.startswith(("http-buy", "buy-", "probe-exc", "sku-mismatch",
                               "advance-failed", "keepalive"))
@@ -669,12 +698,17 @@ def keeper_boot_break(i, age, prev, exit_code, short_life=300, base=120, cap=180
     # short_life 才歸零重開 → 退避從來沒有指數成長（實際等於固定 ~5 分鐘），而且
     # 每 ~10 秒噴一筆帳本（一夜 656 筆）。修法＝**記住這次死亡**：
     # life 在「第一次看到它死」時定案，之後的 pass 不重複計數、也不再寫事件。
+    # ⚡ 9/29 用戶核可的追加：**10 分鐘內再次死亡也算「快速連死」**——今晨 slot0 三次
+    # 死亡裡有一次活了 1329 秒（>300）⇒ 不計數、不退避，於是形成重開迴圈。
+    _now_ts = time.time()
+    _repeat = bool(st.get("last") and (_now_ts - st["last"]) < REPEAT_DEATH_S)
     _first = st["life"] is None          # 這次死亡是不是第一次被看到
     if _first:
         st["life"] = age if age > 0 else 0
-        st["seen"] = time.time()
+        st["seen"] = _now_ts
+        st["last"] = _now_ts
     _life = st["life"]
-    if _life >= short_life or _worked:
+    if (_life >= short_life and not _repeat) or _worked:
         st.update({"n": 0, "until": 0.0, "said": 0, "life": None})
         return False
     if _first:                                     # 只在第一次觀察時計數一次
@@ -682,11 +716,13 @@ def keeper_boot_break(i, age, prev, exit_code, short_life=300, base=120, cap=180
         st["said"] = st["n"]
         _wait = base if _fleet_armed() == 0 else min(base * 2 ** (st["n"] - 1), cap)
         st["until"] = st["seen"] + _wait
-        log("keeper%d 連續 %d 次開機即死（exit=%s 壽命 %ds reason=%s）— 退避 %ds 後再試"
-            % (i, st["n"], exit_code, int(_life), _r[:30] or "-", _wait))
+        log("keeper%d 連續 %d 次快速死亡（exit=%s 壽命 %ds%s reason=%s）— 退避 %ds 後再試"
+            % (i, st["n"], exit_code, int(_life),
+               "，10 分內重複" if _repeat else "", _r[:30] or "-", _wait))
         hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
                    state="backoff", exit=exit_code, prev=str(prev.get("state") or ""),
                    reason=_r[:70], up=int(_life), fails=st["n"],
+                   repeat=bool(_repeat),
                    backoff_s=_wait, restarted=False)
     if time.time() >= st["until"]:
         st["life"] = None          # 退避到期 → 放行重開，下次死亡重新起算
@@ -728,6 +764,15 @@ def _keeper_log_tail(i, lines=6, width=420):
         return "ERR:" + repr(e)[:60]
 
 
+def alt_exit_needed(exit_code, fails):
+    """重建要不要改走 BUY 池出口（純函式，可測）。
+
+    原本只有 exit 3（入袋用盡）才換出口；9/29 07:42-07:44 slot0 以 exit 43／1 連死
+    三次、每次都在同一條專屬出口上重試 ⇒ 連續快速死亡 ≥ 門檻也要換（用戶核可）。
+    """
+    return (exit_code == 3) or (int(fails or 0) >= ALT_EXIT_AFTER_FAILS)
+
+
 def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
     """逐 slot 自癒：①進程死（過冷卻）→ 重開 ②進程活但卡住（建袋超 7 分未停泊，
     如 Playwright wedge）→ 殺掉重開。9/19 首次艦隊實證：2 個 slot 卡在建袋期
@@ -755,9 +800,14 @@ def keeper_restart_dead(nodes, cooldown=120, build_deadline=420):
             # 加了兩輪卻一直是空的（9/26 定案）。
             _tail = _keeper_log_tail(i)
             # 入袋用盡（引擎的 sys.exit(3) 全部集中在 fill_bag）⇒ 換出口再重建
-            _alt = (proc.returncode == 3)
+            # ⚡ 9/29 用戶核可的追加：**連續快速死亡 ≥ ALT_EXIT_AFTER_FAILS 次也換出口**。
+            # 原本只有 exit 3 才換，於是 07:42-07:44 slot0 以 exit 43／1 連死三次、
+            # 每次都在同一條專屬出口上重試（存活 399/29/160 秒）。
+            _fails = int((KEEPER_FAILS.get(i) or {}).get("n") or 0)
+            _alt = alt_exit_needed(proc.returncode, _fails)
             if _alt:
-                log("keeper%d 上次死於入袋用盡（exit 3）⇒ 換 BUY 池出口重建" % i)
+                log("keeper%d 重建改走 BUY 池出口（exit=%s、連續快速死亡 %d 次）"
+                    % (i, proc.returncode, _fails))
             _ok = keeper_start(nodes, i, alt_exit=_alt)
             KEEPER_FAILS.setdefault(i, {}).update({"life": None})
             hit_ledger(event="keeper-restart", slot=i, sku=KEEPER_FLEET[i],
@@ -963,22 +1013,23 @@ def _mask_secrets(line):
 
 
 def order_trace(res):
-    """訂單可追蹤尾巴（給通知用）：`｜SKU｜email｜單號｜店名(店號)｜取貨: 窗口`。
+    """訂單可追蹤尾巴（給通知用）：`｜SKU｜email｜單號｜店名(店號)｜取貨: 窗口｜截圖: URL`。
 
-    ⚡ 9/29 用戶要求：下單成功後「完整 email、買到的 SKU、取貨窗口、店名」都要
-    可追蹤，**而且要隨下單成功一起發到 Pushover**。checkout 的 record_order()
-    把 order_no／order_sku／order_email／order_store／order_store_name／order_pickup
-    寫進 keeper state.json，掃描器再抄進私有帳本＋這條通知尾巴。
-    ⛔ 只給「使用者自己的通知」用；public job log 不印（PII 紀律）。
+    ⚡ 9/29 用戶要求：下單成功後「完整 email、買到的 SKU、取貨窗口、店名」都要可追蹤，
+    **而且要隨下單成功一起發到 Pushover**；同日追加：**付款頁截圖 URL**（因為 08:10
+    那發回報 SUBMITTED 其實沒扣款 ⇒ 要有可自己一眼核對的證據）。
+    ⛔ 只要有任何一個欄位就回尾巴（**失敗**但有截圖時也要給 URL，那正是要看證據的時候）；
+       public job log 不印（PII 紀律）。
     """
-    if not res or res.get("state") != "ordered":
+    if not res:
         return ""
     no = str(res.get("order_no") or "").strip()
-    sku = str(res.get("order_sku") or "").strip()
+    sku = str(res.get("order_sku") or res.get("sku") or "").strip()
     email = str(res.get("order_email") or "").strip()
     sname = str(res.get("order_store_name") or "").strip()
     scode = str(res.get("order_store") or "").strip()
     pickup = str(res.get("order_pickup") or "").strip()
+    shot = str(res.get("order_shot") or "").strip()
     bits = [sku, email, no]
     if sname and scode:
         store = "%s(%s)" % (sname, scode)
@@ -988,6 +1039,8 @@ def order_trace(res):
         bits.append(store)
     if pickup:
         bits.append("取貨: " + pickup)
+    if shot:
+        bits.append("截圖: " + shot)
     keep = [b for b in bits if b]
     return ("｜" + "｜".join(keep)) if keep else ""
 
@@ -1190,7 +1243,9 @@ def main():
                                order_store_name=str((res or {}).get("order_store_name")
                                                     or "")[:80],
                                order_pickup=str((res or {}).get("order_pickup")
-                                                or "")[:80])
+                                                or "")[:80],
+                               # 訂單證據截圖 URL（私有 repo blob；Pushover 通知也會帶）
+                               order_shot=str((res or {}).get("order_shot") or "")[:200])
                     # 動態停泊：無論這次下單成敗，都趁熱把該店停起來。
                     # 只發命令、不改本次流程——keeper 下單後會自己重建再停泊。
                     if os.environ.get("KEEPER_PARK_STORE", "0").strip() == "1" \
