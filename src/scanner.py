@@ -1244,6 +1244,30 @@ def main():
                     log("keeper%d 結果: %s（其餘 slot 照常待命）"
                         % (slot, json.dumps(res, ensure_ascii=False)[:140]))
                     _st0 = keeper_state(slot) or {}
+                    # ⭐ 10/02 08:46 實證：快路徑**成立了**（停泊店＝命中店 ⇒ 單步
+                    # placeOrder 1.6 秒），但 body 沒有確認頁 ⇒ 新的 body 語義守門
+                    # 正確判「未確認」（`place-order-unconfirmed-head200`）而不是誤報
+                    # SUBMITTED。截圖也真的上傳了（私有 repo `shot-order-unconfirmed-*`）。
+                    # ⚠ 但兩條可見性缺口：①引擎帳本的 `event=order` 未確認列沒進權威帳本
+                    # （引擎檔合併靠不住）②keeper 結果 JSON 沒帶截圖 URL ⇒ 通知看不到證據。
+                    # 修法＝**掃描器自己以權威帳本留痕＋通知**（不依賴引擎檔合併）。
+                    _reason = str((res or {}).get("reason") or "")
+                    _shot = str(_st0.get("order_shot") or (res or {}).get("order_shot") or "")
+                    _ordn = str(_st0.get("order_no") or (res or {}).get("order_no") or "")
+                    if _shot or _ordn or "unconfirmed" in _reason:
+                        _st1 = "ordered" if (_ordn and "unconfirmed" not in _reason) else "unconfirmed"
+                        hit_ledger(event="order", state=_st1, sku=sku,
+                                   store=store_code, order_no=_ordn[:40],
+                                   email=str(_st0.get("order_email") or "")[:80],
+                                   shot=_shot[:200], reason=_reason[:60],
+                                   slot=slot,
+                                   detail=("快路徑未確認" if _st1 == "unconfirmed"
+                                           else "訂單成立"))
+                        bark("iPhone 18 %s" % ("訂單未確認（不視為成立）"
+                                               if _st1 == "unconfirmed" else "下單結果"),
+                             "%s｜%s｜%s｜截圖: %s"
+                             % (sku, store_code, _reason[:40] or "ok", _shot or "(無)"),
+                             priority=2 if _st1 == "unconfirmed" else 1)
                     hit_ledger(event="keeper", slot=slot, sku=sku,
                                state=(res or {}).get("state", "timeout"),
                                reason=(res or {}).get("reason", ""),
