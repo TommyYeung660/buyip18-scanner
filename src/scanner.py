@@ -673,6 +673,34 @@ def _fleet_armed():
     return n
 
 
+def pick_parked_candidate(cands, parked):
+    """候選店清單中挑「已停泊的那一間」；沒有就退回第一間。純函式（可測）。
+
+    cands＝[(店號, 店名, quote), …]（帳本 detail 會列 2-3 間有貨的店）
+    parked＝{店號: slot}（只含本 SKU 的 slot，見 parked_store_slots）
+    回傳 (店號, 店名, slot或None)。
+    為什麼（9/30-10/02 實證）：挑中停泊店 ⇒ keeper 走快路徑 ~0.5 秒；否則 20.6 秒完整鏈
+    幾乎必敗。兩間店都有貨 ⇒ 換店沒有風險，只有速度差。
+    """
+    for code, name, _q in cands:
+        if code in parked:
+            return code, name, parked[code]
+    code, name = cands[0][0], cands[0][1]
+    return code, name, None
+
+
+def parked_store_slots(sku):
+    """本 SKU 現有 slot 中「已停泊」的店號 → slot 對照表。"""
+    out = {}
+    for j, s in enumerate(KEEPER_FLEET):
+        if s != sku:
+            continue
+        p = str((keeper_state(j) or {}).get("park_store") or "")
+        if p:
+            out.setdefault(p, j)
+    return out
+
+
 def keeper_boot_break(i, age, prev, exit_code, short_life=300, base=120, cap=1800):
     """開機即死的斷路器：回傳 True＝正在退避、這一輪不要重開。
 
@@ -1179,11 +1207,18 @@ def main():
             hits = _fresh
             # SKU 優先序照 PARTS 定義（候選偏好），非字母序
             sku = next((p for p in PARTS if p in hits), sorted(hits)[0])
-            # 結帳頁靠顯示名稱（Apple {店名}）點選，送店名；缺名時退回店號
-            store = hits[sku][0][1]
+            # ⭐ 9/30-10/02 實證：一發命中常同時列出 2-3 間有貨的店（帳本 detail 看得到
+            # 「Causeway Bay@R409(); New Town Plaza@R610()」那種），而原本固定取第一間 ⇒
+            # 若「已停泊的店」也在清單裡，就白白放棄快路徑（~0.5 秒）去走 20.6 秒完整鏈。
+            # 修法：候選店中若有 slot 已停泊該店（同 SKU）⇒ 優先挑它（兩者都有貨，無風險）。
+            _parked = parked_store_slots(sku)
+            _pick = pick_parked_candidate(hits[sku], _parked)
+            store_code, store, _pslot = _pick
+            if _pslot is not None:
+                log("命中候選含已停泊店 %s（slot%d）— 優先選它走快路徑"
+                    % (store_code, _pslot))
             if not store:
-                store = hits[sku][0][0]
-            store_code = hits[sku][0][0]  # R###（方案 B HTTP selectStore 用）
+                store = store_code
             # 立刻把這一對放進冷卻：keeper exit 43 後需 ~2-3 分重建，期間重複偵測
             # 只會重複發緊急通知＋重複跑後備。其他門市／其他 SKU 不受影響。
             hit_cool[(sku, store_code)] = time.time() + HIT_COOLDOWN_S
@@ -1197,7 +1232,8 @@ def main():
                  "%s @ %s — 自動下單已觸發" % (sku, detail[:60]), priority=2)
             # 優先序：命中 SKU 的專屬 keeper slot（秒級）→ 本地結帳（~60-90s）→ 派工（~3 分）
             if keeper_on:
-                slot = keeper_slot_for(sku, store_code)
+                # 已停泊且該 slot 屬本 SKU ⇒ 直接用那個 slot（快路徑前提：命中店＝停泊店）
+                slot = _pslot if _pslot is not None else keeper_slot_for(sku, store_code)
                 st = keeper_state(slot) if slot is not None else None
                 # 不等預熱：slot 未就緒（狀態 None=建袋中/剛崩）即走本地引擎——
                 # 100 秒乾等只會把命中→下單拖成 160+ 秒（9/19 晨 #18/#19 敗因）；
