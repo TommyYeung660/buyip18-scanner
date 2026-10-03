@@ -659,6 +659,12 @@ REPEAT_DEATH_S = int(os.environ.get("KEEPER_REPEAT_DEATH_S", "600"))
 # 連續快速死亡達此數 ⇒ 重建時改用 BUY 池出口（不同風險桶）。原本只有 exit 3 才換出口，
 # 但 9/29 07:42-07:44 slot0 以 exit 43／1 連死三次、每次都在同一條專屬出口上重試。
 ALT_EXIT_AFTER_FAILS = int(os.environ.get("KEEPER_ALT_EXIT_AFTER", "2"))
+# 風暴期保護（10/03 實證）：命中後這麼久內不急著主動回收該 slot（避免自己的換 session
+# 重填 POST 把下一發的第一步墊掉、或讓命中撞上 refreshing）；但齡到 MAX_AGE 就照舊回收
+# （會話 TTL ~1218 秒，1080 是正常回收門檻，這裡留 ~38 秒餘裕）。
+KEEPER_LASTHIT = {}                                        # slot -> 最近一次派命中的 ts
+KEEPER_HIT_HOLD_S = int(os.environ.get("KEEPER_HIT_HOLD_S", "120"))
+KEEPER_HIT_HOLD_MAX_AGE = int(os.environ.get("KEEPER_HIT_HOLD_MAX_AGE", "1180"))
 
 
 def _fleet_armed():
@@ -925,6 +931,17 @@ def keeper_recycle_old(nodes, max_age_s):
         # 進程，只有這樣才會收斂；見 KEEPER_RENEWED 的宣告處）。
         age = now - max(KEEPER_LASTSTART.get(i, 0), KEEPER_RENEWED.get(i, 0))
         if age < max_age_s:
+            continue
+        # ⭐ 10/03 實證的「風暴期保護」：命中後 HIT_HOLD_S 內不急著主動回收。
+        # 為什麼（本窗量化）：**17 發完整鏈裡有 7 發（41%）第一步被墊 ≥2 秒**（最高 9.4 秒），
+        # 來源就是**我們自己在原地換 session 的重填 POST**；另有 2 發命中撞上
+        # `keeper-skip(refreshing)` 整發跳過。熱 SKU（今天黑512）每 2-3 分鐘被命中一次
+        # ⇒ 剛派完命中就換 session＝把下一發推進自己的節流窗裡。
+        # ⛔ 但**不可為了保護而讓會話逾齡**（TTL ~1218 秒）：齡到 HIT_HOLD_MAX_AGE 就照舊回收。
+        if (now - KEEPER_LASTHIT.get(i, 0) < KEEPER_HIT_HOLD_S
+                and age < KEEPER_HIT_HOLD_MAX_AGE):
+            log("keeper%d 命中後 %ds ⇒ 暫緩主動回收（風暴期保護；齡 %ds）"
+                % (i, int(now - KEEPER_LASTHIT[i]), int(age)))
             continue
         # ⛔ 在途檢查必須排在「未武裝就跳過」**之前**：refresh 進行中的 slot 正是
         # 未武裝（狀態 refreshing），若先跳過它，看門狗（超時 → 殺掉重建）永遠
@@ -1240,6 +1257,7 @@ def main():
                 # 命中落在 slot 推進期時命令檔會被停泊後 0.3 秒拾取，無需等
                 if slot is not None and st and st.get("state") in KEEPER_ARMED:
                     keeper_fire(slot, sku, store, store_code)
+                    KEEPER_LASTHIT[slot] = time.time()   # 風暴期保護用（見 keeper_recycle_old）
                     res = keeper_wait(slot, 600)
                     log("keeper%d 結果: %s（其餘 slot 照常待命）"
                         % (slot, json.dumps(res, ensure_ascii=False)[:140]))
