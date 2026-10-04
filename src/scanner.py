@@ -656,6 +656,12 @@ KEEPER_RENEWED = {}
 # 快速連死的窗口（秒）：9/29 用戶核可——同一 slot 在此窗口內再次死亡，即使上次活得比
 # short_life 久，也要算進退避計數（否則「活 22 分鐘→死→重開→再死」會無限循環）。
 REPEAT_DEATH_S = int(os.environ.get("KEEPER_REPEAT_DEATH_S", "600"))
+# ⭐ 10/04 實證：exit 3（入袋 10 輪用盡）的**節奏**與其他死亡不同——同一個被閘住的 SKU
+# （布根地紅 256/512 的商品頁連續 541）會讓同一 slot 每 ~25 分鐘就自殺一次，而
+# `REPEAT_DEATH_S=600`（10 分）判定「不算重複」⇒ 退避永遠停在 120 秒 ⇒ 迴圈不收斂
+# （10/04 窗：exit 3 佔 recycle 的 14%，9 次死亡集中在 2 個 SKU）。把 exit 3 的重複窗
+# 放寬到 30 分鐘，讓既有指數退避（120→240→480…）真的接手。
+EXIT3_REPEAT_S = int(os.environ.get("KEEPER_EXIT3_REPEAT_S", "1800"))
 # 連續快速死亡達此數 ⇒ 重建時改用 BUY 池出口（不同風險桶）。原本只有 exit 3 才換出口，
 # 但 9/29 07:42-07:44 slot0 以 exit 43／1 連死三次、每次都在同一條專屬出口上重試。
 ALT_EXIT_AFTER_FAILS = int(os.environ.get("KEEPER_ALT_EXIT_AFTER", "2"))
@@ -735,7 +741,10 @@ def keeper_boot_break(i, age, prev, exit_code, short_life=300, base=120, cap=180
     # ⚡ 9/29 用戶核可的追加：**10 分鐘內再次死亡也算「快速連死」**——今晨 slot0 三次
     # 死亡裡有一次活了 1329 秒（>300）⇒ 不計數、不退避，於是形成重開迴圈。
     _now_ts = time.time()
-    _repeat = bool(st.get("last") and (_now_ts - st["last"]) < REPEAT_DEATH_S)
+    # exit 3（入袋用盡）用較長的重複窗：同一 SKU 被閘住時死亡間隔可達 25 分鐘，
+    # 10 分鐘窗會讓它每次都算「新序列」⇒ 退避不升級、迴圈不收敛（10/04 實證）。
+    _rep_s = EXIT3_REPEAT_S if exit_code == 3 else REPEAT_DEATH_S
+    _repeat = bool(st.get("last") and (_now_ts - st["last"]) < _rep_s)
     _first = st["life"] is None          # 這次死亡是不是第一次被看到
     if _first:
         st["life"] = age if age > 0 else 0
