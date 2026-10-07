@@ -113,4 +113,11 @@ jobs:
         run: |
           echo "---- 帳本尾 8 行 ----"; tail -8 engine/status/hits.jsonl 2>/dev/null || echo "(無)"
           echo "---- 截圖 ----"; ls -la engine/status/*.png 2>/dev/null | tail -6 || echo "(無)"
-          echo "---- latest.json ----"; head -c 600 engine/status/latest.json 2>/dev/null || true
+          echo "---- latest.json（完整）----"; cat engine/status/latest.json 2>/dev/null || true
+          echo "---- 引擎 log_tail（最後 25 行）----"
+          python3 - <<'PY2' 2>/dev/null || true
+          import json
+          d = json.load(open("engine/status/latest.json", encoding="utf-8"))
+          for l in (d.get("log_tail") or [])[-25:]:
+              print("  ", l[:160])
+          PY2
