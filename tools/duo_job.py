@@ -26,6 +26,7 @@
   DUO_PROXY_SERVER / DUO_PROXY_USER / DUO_PROXY_PASS  專屬出口（可空⇒直連）
   DUO_WAIT_UNTIL 例 2026-10-16T20:00:00+08:00（可空）
   DUO_DEADLINE_MIN 預設 25
+  DUO_MAX_ATTEMPTS 預設 3（每 job 最多幾發；防同一卡重複送單）
   DUO_LEDGER_REPO  預設 TommyYeung660/buyip18-checkout
 """
 import base64
@@ -252,6 +253,10 @@ def main():
             break
         if os.environ.get("DRY_RUN") == "1":
             log("DRY_RUN ⇒ 一發即收工（不下單）")
+            break
+        cap = int(os.environ.get("DUO_MAX_ATTEMPTS", "3") or 3)
+        if n >= cap:
+            log("⛔ 已達重試上限 %d 發 ⇒ 收工（避免同一 profile/卡重複送單）" % cap)
             break
         if time.time() > deadline:
             log("⏰ 超過期限（%s 分鐘）⇒ 收工" % os.environ.get("DUO_DEADLINE_MIN", "25"))

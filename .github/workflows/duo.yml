@@ -114,6 +114,7 @@ jobs:
           DRY_RUN: ${{ github.event.inputs.mode == 'dry' && 'true' || 'false' }}
           DUO_WAIT_UNTIL: ${{ github.event.inputs.wait_until }}
           DUO_DEADLINE_MIN: ${{ github.event.inputs.deadline_min || '40' }}
+          DUO_MAX_ATTEMPTS: "3"
         run: |
           set -a; . /tmp/proxy.env; set +a
           export PROFILES_JSON="$(cat /tmp/profiles.json)"
