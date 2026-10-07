@@ -25,9 +25,10 @@ on:
       profiles:
         description: "profile 名（逗號分隔；留空=duo01..duo10）"
         default: ""
-  schedule:
-    # 2026-10-16 19:50 HKT（=11:50 UTC）起跑；job 內會重試到 20:00 預訂開放後成立
-    - cron: "50 11 16 10 *"
+  # ⏸ 2026-10-07 用戶指示「先暫停一切任務」⇒ 定時觸發**先關掉**，避免 10/16 自動開火
+  # （卡未就緒、10 組 profile/出口未備妥）。恢復時把下面兩行取消註解即可：
+  # schedule:
+  #   - cron: "50 11 16 10 *"   # 2026-10-16 19:50 HKT 起跑，job 內等到 20:00
 
 concurrency:
   group: duo-orders
