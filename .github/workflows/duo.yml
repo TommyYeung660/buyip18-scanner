@@ -19,6 +19,9 @@ on:
       deadline_min:
         description: "單一 job 的總時限（分鐘）"
         default: "40"
+      use_app_config:
+        description: "true=用 App 推送的下單配置（不覆蓋 SKU）；false=照 matrix 的每路指定款"
+        default: "false"
       profiles:
         description: "profile 名（逗號分隔；留空=duo01..duo10）"
         default: ""
@@ -103,7 +106,8 @@ jobs:
           GH_PAT: ${{ secrets.CHECKOUT_PAT }}
           BARK_URL: ${{ secrets.BARK_URL }}   # 專案現用 PUSHOVER_*，留著無害
           PROFILE: ${{ matrix.profile }}
-          SKU: ${{ matrix.sku }}
+          # use_app_config=true ⇒ 不傳 SKU，讓引擎照 auto_duo.json 的 candidates 走（App 的下單配置）
+          SKU: ${{ github.event.inputs.use_app_config == 'true' && '' || matrix.sku }}
           AUTO_JSON: auto_duo.json
           FULFILLMENT: HOME
           BUY_COUNT: "2"
