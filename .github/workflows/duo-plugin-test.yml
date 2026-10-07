@@ -83,4 +83,13 @@ jobs:
               print("  ", {k: e.get(k) for k in ("phase", "step", "detail", "note") if e.get(k)})
           manual = [e for e in evs if str(e.get("phase", "")).startswith("manual-order")]
           print("manual-order events:", len(manual))
+          dumps = [e for e in evs if e.get("step") == "billing-dump"]
+          print("billing-dump events:", len(dumps))
+          for e in dumps[-1:]:
+              d = e.get("dump") or {}
+              print("  url:", d.get("url"))
+              print("  text_head:", (d.get("text_head") or "")[:200])
+              print("  radios:", json.dumps(d.get("radios"), ensure_ascii=False)[:600])
+              print("  buttons:", json.dumps(d.get("buttons"), ensure_ascii=False)[:600])
+              print("  inputs:", json.dumps(d.get("inputs"), ensure_ascii=False)[:400])
           PY
