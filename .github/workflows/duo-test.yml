@@ -95,7 +95,9 @@ jobs:
           BUY_COUNT: "1"
           ENGINE_DIR: engine
           HEADLESS: "1"
-          DRY_RUN: ${{ github.event.inputs.mode == 'live' && '' || '1' }}
+          # ⚠ GitHub 表達式的空字串是 falsy ⇒ `live && '' || '1'` 恆為 '1'（10/07 實跑抓到的坑：
+          # 明明選 live 卻 dry）。改用明確的兩態值：dry⇒true、live⇒false。
+          DRY_RUN: ${{ github.event.inputs.mode == 'dry' && 'true' || 'false' }}
           DUO_DEADLINE_MIN: ${{ github.event.inputs.deadline_min || '20' }}
         run: |
           set -a; . /tmp/proxy.env; set +a
