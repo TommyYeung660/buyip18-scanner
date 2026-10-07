@@ -66,6 +66,15 @@ jobs:
           python3 tests/live_delivery_dry.py 2>&1 | tail -60
         continue-on-error: true
 
+      - name: 上傳 JSONL（飛行記錄）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bip18-live-delivery-jsonl
+          path: /tmp/bip18-live-delivery.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: 記錄（report / jsonl 摘要）
         if: always()
         run: |
@@ -83,6 +92,9 @@ jobs:
               print("  ", {k: e.get(k) for k in ("phase", "step", "detail", "note") if e.get(k)})
           manual = [e for e in evs if str(e.get("phase", "")).startswith("manual-order")]
           print("manual-order events:", len(manual))
+          print("---- JSONL 尾 12 行（各截 400 字）----")
+          for l in open("/tmp/bip18-live-delivery.jsonl", encoding="utf-8").read().splitlines()[-12:]:
+              print("  ", l[:400])
           dumps = [e for e in evs if e.get("step") == "billing-dump"]
           print("billing-dump events:", len(dumps))
           for e in dumps[-1:]:
