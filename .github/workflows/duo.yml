@@ -34,8 +34,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: "preflight（就緒表：profiles × 出口）"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: 檢查 profiles / 出口形狀（不印值）
+        env:
+          PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
+          SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+        run: python3 tools/duo_preflight.py
+        continue-on-error: true      # 就緒表是給人看的；不足時仍讓各 job 自己判（見 duo_job 的 profile 檢查）
+
   duo:
     name: "duo ${{ matrix.profile }} · ${{ matrix.variant }}"
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
@@ -104,7 +118,9 @@ jobs:
       - name: 下單（一 profile 一出口，重試到期限）
         env:
           GH_PAT: ${{ secrets.CHECKOUT_PAT }}
-          BARK_URL: ${{ secrets.BARK_URL }}   # 專案現用 PUSHOVER_*，留著無害
+          BARK_URL: ${{ secrets.BARK_URL }}
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}   # 專案現用 PUSHOVER_*，留著無害
           PROFILE: ${{ matrix.profile }}
           # use_app_config=true ⇒ 不傳 SKU，讓引擎照 auto_duo.json 的 candidates 走（App 的下單配置）
           SKU: ${{ github.event.inputs.use_app_config == 'true' && '' || matrix.sku }}

@@ -87,7 +87,9 @@ jobs:
       - name: 跑單一 profile（送貨鏈）
         env:
           GH_PAT: ${{ secrets.CHECKOUT_PAT }}
-          BARK_URL: ${{ secrets.BARK_URL }}   # 專案現用 PUSHOVER_*，留著無害
+          BARK_URL: ${{ secrets.BARK_URL }}
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}   # 專案現用 PUSHOVER_*，留著無害
           PROFILE: ${{ github.event.inputs.profile }}
           SKU: ${{ github.event.inputs.sku }}
           AUTO_JSON: ${{ github.event.inputs.model == 'duo' && 'auto_duo.json' || 'auto.json' }}

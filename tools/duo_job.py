@@ -240,10 +240,59 @@ def push_shots():
             break
 
 
+def profile_exists():
+    """確認 PROFILE 真的在 PROFILES_JSON 內。
+
+    ⚠ 引擎的行為是「找不到就用第一個 profile」——單路測試很方便，但**10 路並發時是災難**：
+    9 路會全部退回同一張卡，Apple 端看起來就是同一顧客在同秒下 10 單。
+    """
+    want = os.environ.get("PROFILE") or ""
+    try:
+        plist = (json.loads(os.environ.get("PROFILES_JSON") or "{}")).get("profiles") or []
+    except Exception:
+        return None
+    names = [str(p.get("name") or "") for p in plist]
+    if not names:
+        return None
+    if want in names:
+        return True
+    if os.environ.get("DUO_ALLOW_FALLBACK") == "1":
+        log("⚠ PROFILE=%s 不在 secret 內（%s）— 因 DUO_ALLOW_FALLBACK=1 才允許退回第一個"
+            % (want, ",".join(names[:12])))
+        return True
+    log("⛔ PROFILE=%s 不在 PROFILES_JSON 內（現有：%s）⇒ 直接結束，不退回其他 profile"
+        % (want, ",".join(names[:12])))
+    return False
+
+
+def notify(title, msg, priority=0):
+    """手機通知（Pushover 優先、Bark 次之）。任何失敗都不影響流程。"""
+    import urllib.parse
+    tok = (os.environ.get("PUSHOVER_TOKEN") or "").strip()
+    usr = (os.environ.get("PUSHOVER_USER") or "").strip()
+    bark = (os.environ.get("BARK_URL") or "").strip()
+    try:
+        if tok and usr:
+            data = urllib.parse.urlencode({"token": tok, "user": usr, "title": title[:100],
+                                           "message": msg[:900], "priority": priority}).encode()
+            urllib.request.urlopen(urllib.request.Request(
+                "https://api.pushover.net/1/messages.json", data=data), timeout=15)
+            return
+        if bark:
+            urllib.request.urlopen(bark.rstrip("/") + "/" + urllib.parse.quote(title + " " + msg)[:400],
+                                   timeout=15)
+    except Exception as e:
+        log("通知失敗（不影響流程）：%r" % (e,))
+
+
 def main():
     if not os.environ.get("PROFILE"):
         log("⛔ 缺 PROFILE")
         return 2
+    pe = profile_exists()
+    if pe is False:
+        notify("Duo job 中止", "PROFILE=%s 不在 PROFILES_JSON 內" % os.environ.get("PROFILE"))
+        return 3
     wait_until(os.environ.get("DUO_WAIT_UNTIL", ""))
     deadline = T0 + int(os.environ.get("DUO_DEADLINE_MIN", "25")) * 60
     n = 0
@@ -256,12 +305,16 @@ def main():
         done = ordered_ok()
         if done:
             log("✅ 訂單成立：%s（第 %d 發）" % (done, n))
+            notify("Duo 下單成功", "%s｜訂單 %s" % (os.environ.get("PROFILE", ""), done), priority=1)
             break
         ev = order_evidence()
         if ev and ev[0] != "ordered":
             # 未確認（或任何非 ordered 的訂單痕跡）⇒ **停手，交人判斷**，絕不重試
             log("⚠ 帳本出現訂單痕跡但狀態=%s（單號=%s）⇒ 停止重試（避免雙單）；"
                 "請到 Apple 帳戶頁核對" % (ev[0], ev[1] or "(無)"))
+            notify("Duo 下單結果：%s" % ev[0],
+                   "%s｜%s｜請到 Apple 帳戶頁核對" % (os.environ.get("PROFILE", ""), ev[0]),
+                   priority=1)
             break
         if os.environ.get("DRY_RUN") == "1":
             log("DRY_RUN ⇒ 一發即收工（不下單）")
