@@ -93,7 +93,11 @@ def run_engine_once(n):
     t = time.time()
     p = subprocess.run([sys.executable, "-u", "checkout.py"], cwd=ENGINE,
                        env=engine_env(), capture_output=True, text=True, timeout=1800)
-    tail = (p.stdout or "").strip().splitlines()[-6:]
+    # 印多一點（並優先印關鍵行）：CVV/卡號長度、訪客、履約、拒付等證據否則看不到
+    lines = (p.stdout or "").strip().splitlines()
+    keys = ("CVV", "卡號", "到期", "送貨鏈", "拒付", "明確拒絕", "未確認", "訂單號", "訪客",
+            "KEEPER-B", "下單", "例外", "停")
+    tail = [l for l in lines if any(k in l for k in keys)][-14:] or lines[-8:]
     for l in tail:
         log("   " + l[:160])
     log("── 第 %d 發結束：exit=%s、耗時 %.0fs" % (n, p.returncode, time.time() - t))
