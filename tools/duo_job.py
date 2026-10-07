@@ -225,8 +225,15 @@ def push_shots():
             with open(os.path.join(d, f), "rb") as fh:
                 content = base64.b64encode(fh.read()).decode()
             name = "status/%s" % os.path.basename(f).replace(" ", "_")
-            gh("PUT", API + name, data={"message": "duo job shot (profile=%s)" % os.environ.get("PROFILE", ""),
-                                        "content": content, "branch": "main"})
+            body = {"message": "duo job shot (profile=%s)" % os.environ.get("PROFILE", ""),
+                    "content": content, "branch": "main"}
+            # 同名檔已存在時必須帶 sha（否則 422，10/07 實跑吃過）
+            try:
+                meta = gh("GET", API + name) or "{}"
+                body["sha"] = json.loads(meta).get("sha", "")
+            except Exception:
+                pass
+            gh("PUT", API + name, data=body)
             log("截圖已推：%s" % name)
         except Exception as e:
             log("截圖推送失敗 %s：%r" % (f, e))
