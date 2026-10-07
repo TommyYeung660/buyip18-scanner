@@ -72,8 +72,11 @@ jobs:
           import json, os
           i = int(os.environ.get("IDX") or 0)
           arr = json.loads(os.environ.get("SLOT_PROXIES_JSON") or "[]")
-          row = (arr[i] if i < len(arr) else []) + ["", "", "", ""]
-          h, p, u, w = row[:4]
+          # 形狀＝list of dict：{"host","port","user","pass"}（與 scanner.yml 的
+          # per-slot listener 生成同一份 secret）
+          row = arr[i] if i < len(arr) else {}
+          h, p, u, w = (row.get("host", ""), row.get("port", ""),
+                        row.get("user", ""), row.get("pass", ""))
           print("DUO_PROXY_SERVER=%s:%s" % (h, p) if h else "DUO_PROXY_SERVER=")
           print("DUO_PROXY_USER=%s" % u)
           print("DUO_PROXY_PASS=%s" % w)
