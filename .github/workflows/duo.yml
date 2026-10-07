@@ -55,7 +55,7 @@ jobs:
 
       - name: 取得結帳引擎（私有 repo）
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_PAT: ${{ secrets.CHECKOUT_PAT }}
         run: |
           git clone --depth 1 "https://x-access-token:${GH_PAT}@github.com/TommyYeung660/buyip18-checkout.git" engine
           git -C engine log --oneline -1
@@ -97,8 +97,8 @@ jobs:
 
       - name: 下單（一 profile 一出口，重試到期限）
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-          BARK_URL: ${{ secrets.BARK_URL }}
+          GH_PAT: ${{ secrets.CHECKOUT_PAT }}
+          BARK_URL: ${{ secrets.BARK_URL }}   # 專案現用 PUSHOVER_*，留著無害
           PROFILE: ${{ matrix.profile }}
           SKU: ${{ matrix.sku }}
           AUTO_JSON: auto_duo.json

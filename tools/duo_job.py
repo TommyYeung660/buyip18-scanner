@@ -111,7 +111,7 @@ def ledger_rows():
 
 
 def gh(method, url, data=None, raw=False):
-    pat = (os.environ.get("GH_PAT") or "").strip()
+    pat = (os.environ.get("GH_PAT") or os.environ.get("CHECKOUT_PAT") or "").strip()
     if not pat:
         return None
     hdr = {"Authorization": "Bearer " + pat,
