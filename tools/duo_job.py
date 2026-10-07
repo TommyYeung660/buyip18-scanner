@@ -160,6 +160,12 @@ def push_ledger():
                 os.environ.get("GITHUB_RUN_ID", "local"), os.environ.get("PROFILE", "")),
             "content": base64.b64encode(("\n".join(merged) + "\n").encode()).decode(),
             "branch": "main"}
+    # ⚠ 更新既有檔案必須帶 `sha`，否則 GitHub 回 422（10/07 實跑第一次推送就吃這個）
+    try:
+        meta = gh("GET", API + LEDGER_PATH) or "{}"
+        body["sha"] = json.loads(meta).get("sha", "")
+    except Exception:
+        pass
     try:
         gh("PUT", API + LEDGER_PATH, data=body)
         log("帳本已推（合併後 %d 行，新增 %d 行）"
@@ -177,6 +183,30 @@ def ordered_ok():
         if d.get("event") == "order" and d.get("state") == "ordered":
             return d.get("order_no") or "SUBMITTED"
     return None
+
+
+def push_shots():
+    """把本 job 產生的失敗/證據截圖推到私有 repo（公開 repo 絕不放截圖）。"""
+    d = os.path.join(ENGINE, "status")
+    if not os.path.isdir(d):
+        return
+    pat = (os.environ.get("GH_PAT") or os.environ.get("CHECKOUT_PAT") or "").strip()
+    if not pat:
+        return
+    new_files = [f for f in sorted(os.listdir(d))
+                 if f.startswith("shot-") and f.endswith(".png")
+                 and os.path.getmtime(os.path.join(d, f)) >= T0]
+    for f in new_files[:8]:
+        try:
+            with open(os.path.join(d, f), "rb") as fh:
+                content = base64.b64encode(fh.read()).decode()
+            name = "status/%s" % os.path.basename(f).replace(" ", "_")
+            gh("PUT", API + name, data={"message": "duo job shot (profile=%s)" % os.environ.get("PROFILE", ""),
+                                        "content": content, "branch": "main"})
+            log("截圖已推：%s" % name)
+        except Exception as e:
+            log("截圖推送失敗 %s：%r" % (f, e))
+            break
 
 
 def main():
@@ -204,6 +234,7 @@ def main():
             break
         time.sleep(15)
     push_ledger()
+    push_shots()
     log("本 job 結束（共 %d 發）" % n)
     return 0
 
