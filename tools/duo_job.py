@@ -351,7 +351,7 @@ def main():
                    "%s｜%s｜請到 Apple 帳戶頁核對" % (os.environ.get("PROFILE", ""), ev[0]),
                    priority=1)
             break
-        if os.environ.get("DRY_RUN") == "1":
+        if str(os.environ.get("DRY_RUN", "")).strip().lower() in ("1", "true", "yes"):
             log("DRY_RUN ⇒ 一發即收工（不下單）")
             break
         cap = int(os.environ.get("DUO_MAX_ATTEMPTS", "3") or 3)
