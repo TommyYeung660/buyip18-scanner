@@ -108,6 +108,7 @@ jobs:
           FULFILLMENT: HOME
           BUY_COUNT: "2"
           ENGINE_DIR: engine
+          HEADLESS: "1"
           DRY_RUN: ${{ github.event.inputs.mode == 'live' && '' || '1' }}
           DUO_WAIT_UNTIL: ${{ github.event.inputs.wait_until }}
           DUO_DEADLINE_MIN: ${{ github.event.inputs.deadline_min || '40' }}
