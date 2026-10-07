@@ -1,0 +1,18 @@
+name: Duo preflight (readiness only)
+
+# 只印「就緒表」：profiles 的必填欄位檢查＋重複偵測＋出口數量。不下單、不改任何東西。
+# 10/14 備齊 10 組 profile 與出口後跑一次；10/16 T-30 分鐘再跑一次確認。
+on:
+  workflow_dispatch: {}
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: 就緒表（不印秘密值）
+        env:
+          PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
+          SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+        run: python3 tools/duo_preflight.py
