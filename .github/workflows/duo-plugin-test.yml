@@ -1,0 +1,86 @@
+name: Duo plugin TEST (plugin delivery auto-fill, dry)
+
+# Step 2 驗收：在**真站**上驗證插件的送貨 auto-fill，並證明它**不會**按下單鍵。
+#
+# 為什麼在 runner 上跑：本機 Mac 的 IP 入袋被真站的機率閘擋死（實測 6/6 載入失敗），
+# 而 runner ＋ 專屬出口正是今天真的下到單的那條路（duo-test）。所以這裡：
+#   ① clone 私有插件 repo（不落任何機密）② 用 SLOT_PROXIES_JSON[idx] 當瀏覽器出口
+#   ③ dry_run 硬鎖（程式中 assert）＋測試卡＋假地址 ⇒ 就算全綠也不會成立訂單
+#   ④ 最後一鍵永久留給人手（manual_order=true）
+on:
+  workflow_dispatch:
+    inputs:
+      proxy_idx:
+        description: "SLOT_PROXIES_JSON 的索引（用哪個出口）"
+        default: "0"
+      sku:
+        description: "要配置的 SKU（預設 18 Pro 256GB 布根地紅）"
+        default: "MJXQ4ZA/A"
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取得插件（私有 repo）
+        env:
+          GH_PAT: ${{ secrets.CHECKOUT_PAT }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${GH_PAT}@github.com/TommyYeung660/buyip18-extension.git" ext
+          git -C ext log --oneline -1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝 Playwright ＋ stealth
+        run: |
+          python -m pip install --quiet playwright "playwright-stealth>=2.0.3"
+          python -m playwright install --with-deps chromium
+
+      - name: 準備出口（/tmp + chmod 600）
+        env:
+          SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+          IDX: ${{ github.event.inputs.proxy_idx }}
+        run: |
+          set -e
+          python3 - <<'PY' > /tmp/proxy.env
+          import json, os
+          i = int(os.environ.get("IDX") or 0)
+          arr = json.loads(os.environ.get("SLOT_PROXIES_JSON") or "[]")
+          row = arr[i] if i < len(arr) else {}
+          print("DUO_PROXY_SERVER=%s:%s" % (row.get("host", ""), row.get("port", "")))
+          print("DUO_PROXY_USER=%s" % row.get("user", ""))
+          print("DUO_PROXY_PASS=%s" % row.get("pass", ""))
+          PY
+          chmod 600 /tmp/proxy.env
+
+      - name: 跑插件真站 dry（送貨 auto-fill，不下單）
+        env:
+          BIP18_LIVE_DELIVERY: I_UNDERSTAND
+        run: |
+          set -a; . /tmp/proxy.env; set +a
+          cd ext
+          python3 tests/live_delivery_dry.py 2>&1 | tail -60
+        continue-on-error: true
+
+      - name: 記錄（report / jsonl 摘要）
+        if: always()
+        run: |
+          echo "---- report 前 40 行 ----"; head -40 /tmp/bip18-live-delivery-report.md 2>/dev/null || echo "(無)"
+          echo "---- 送貨欄位事件 ----"
+          python3 - <<'PY'
+          import json
+          try:
+              evs = [json.loads(l) for l in open("/tmp/bip18-live-delivery.jsonl", encoding="utf-8")]
+          except Exception:
+              evs = []
+          ship = [e for e in evs if e.get("step") == "shipping-field"]
+          print("shipping-field events:", len(ship))
+          for e in ship[-10:]:
+              print("  ", {k: e.get(k) for k in ("phase", "step", "detail", "note") if e.get(k)})
+          manual = [e for e in evs if str(e.get("phase", "")).startswith("manual-order")]
+          print("manual-order events:", len(manual))
+          PY
