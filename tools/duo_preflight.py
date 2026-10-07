@@ -22,6 +22,40 @@ NEED = [("first_name", "名"), ("last_name", "姓"), ("email", "email"), ("phone
 WANT_PROFILES = 10
 
 
+def luhn_ok(s) -> bool:
+    d = [int(c) for c in str(s or "") if c.isdigit()]
+    if len(d) < 12:
+        return False
+    tot, alt = 0, False
+    for x in reversed(d):
+        if alt:
+            x *= 2
+            if x > 9:
+                x -= 9
+        tot += x
+        alt = not alt
+    return tot % 10 == 0
+
+
+def expiry_ok(s) -> bool:
+    """MM/YY（或 MM/YYYY）且尚未過期（以當月為界）。"""
+    import datetime
+    t = str(s or "").replace(" ", "")
+    if "/" not in t:
+        return False
+    mm, yy = t.split("/")[:2]
+    try:
+        m = int(mm)
+        y = int(yy)
+    except Exception:
+        return False
+    if not (1 <= m <= 12):
+        return False
+    y += 2000 if y < 100 else 0
+    now = datetime.date.today()
+    return (y, m) >= (now.year, now.month)
+
+
 def mask(v, keep=2):
     v = str(v or "")
     return "" if not v else ("*" * max(0, len(v) - keep) + v[-keep:])
@@ -57,9 +91,16 @@ def main() -> int:
                 dup.append("%s 與 %s 相同" % (label, store[v]))
             else:
                 store[v] = name
-        flag = "✅" if not miss and not dup else "❌"
-        print("  %s %-10s 卡=%s 到期=%s 地址=%s%s%s"
-              % (flag, name, mask(p.get("card_number")), p.get("card_expiry") or "-",
+        # ⚡ 10/07 實跑教訓：卡號若**填錯一位**，Apple 會在前端就回「請輸入有效的信用卡號碼」
+        # （Billing 卡住、整輪白跑）。這在 20:00 當晚是不可接受的失敗 ⇒ 出貨前先用 Luhn 檢查。
+        bad_card = bool(str(p.get("card_number") or "").strip()) and not luhn_ok(p.get("card_number"))
+        bad_exp = bool(str(p.get("card_expiry") or "").strip()) and not expiry_ok(p.get("card_expiry"))
+        flag = "✅" if not miss and not dup and not bad_card and not bad_exp else "❌"
+        print("  %s %-10s 卡=%s%s 到期=%s%s 地址=%s%s%s"
+              % (flag, name, mask(p.get("card_number")),
+                 "（Luhn 不通過）" if bad_card else "",
+                 p.get("card_expiry") or "-",
+                 "（格式/已過期）" if bad_exp else "",
                  mask(p.get("billing_line1"), 4),
                  ("  缺：" + "/".join(miss)) if miss else "",
                  ("  ⚠重複：" + "；".join(dup)) if dup else ""))
@@ -67,6 +108,11 @@ def main() -> int:
             problems.append("%s 缺 %s" % (name, "/".join(miss)))
         if dup:
             problems.append("%s %s" % (name, "；".join(dup)))
+        if bad_card:
+            problems.append("%s 卡號 Luhn 檢查不通過（尾 %s）——Apple 前端會直接拒，請重新核對數字"
+                            % (name, mask(p.get("card_number"), 4)))
+        if bad_exp:
+            problems.append("%s 到期日格式錯誤或已過期：%s" % (name, p.get("card_expiry")))
 
     print("=== 出口（SLOT_PROXIES_JSON）===")
     ok_px = 0

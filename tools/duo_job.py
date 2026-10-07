@@ -311,6 +311,17 @@ def main():
             log("✅ 訂單成立：%s（第 %d 發）" % (done, n))
             notify("Duo 下單成功", "%s｜訂單 %s" % (os.environ.get("PROFILE", ""), done), priority=1)
             break
+        # 卡資料本身有錯（Luhn/到期/CVV）⇒ 再跑幾次都一樣，直接收工並通知
+        try:
+            _st = json.loads(open(os.path.join(ENGINE, "status", "latest.json"),
+                                  encoding="utf-8").read()).get("state")
+        except Exception:
+            _st = None
+        if _st == "bad-card":
+            log("⛔ 引擎回報 bad-card（卡片資料不合法）⇒ 收工，請更正 profile 後再跑")
+            notify("Duo 卡片資料有誤", "%s：%s 的卡號/到期/CVV 不合法，已在開瀏覽器前中止"
+                   % (os.environ.get("PROFILE", ""), os.environ.get("SKU", "")))
+            break
         ev = order_evidence()
         if ev and ev[0] != "ordered":
             # 未確認（或任何非 ordered 的訂單痕跡）⇒ **停手，交人判斷**，絕不重試
