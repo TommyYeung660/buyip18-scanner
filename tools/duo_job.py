@@ -100,7 +100,10 @@ def run_engine_once(n):
     return p.returncode
 
 
-def ledger_rows():
+BASELINE = {"n": None}
+
+
+def ledger_rows(all_rows=False):
     f = os.path.join(ENGINE, "status", "hits.jsonl")
     if not os.path.exists(f):
         return []
@@ -108,7 +111,9 @@ def ledger_rows():
     for line in open(f, encoding="utf-8", errors="replace").read().splitlines():
         if line.strip().startswith("{"):
             out.append(line.strip())
-    return out
+    if BASELINE["n"] is None:
+        BASELINE["n"] = len(out)      # 第一次讀＝歷史，不算本 job 的痕跡
+    return out if all_rows else out[BASELINE["n"]:]
 
 
 def gh(method, url, data=None, raw=False):
