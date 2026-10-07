@@ -174,6 +174,24 @@ def push_ledger():
         log("帳本推送失敗：%r（不影響已成立的訂單）" % (e,))
 
 
+def order_evidence():
+    """回傳 (state, order_no)：任何「可能已成立」的證據都要讓迴圈停下來。
+
+    ⚠ 安全：`unconfirmed`（200 但 body 沒確認頁）**不等於失敗**——它可能是已成立的單
+    （本專案 9/29 誤報、10/02 三發未確認都是這型）。若在這裡繼續重試，就有雙單風險。
+    ∴ 迴圈只在「完全沒有訂單痕跡」時才重試。
+    """
+    for line in ledger_rows():
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("event") != "order":
+            continue
+        return (d.get("state") or "?", d.get("order_no") or "")
+    return None
+
+
 def ordered_ok():
     for line in ledger_rows():
         try:
@@ -225,6 +243,12 @@ def main():
         done = ordered_ok()
         if done:
             log("✅ 訂單成立：%s（第 %d 發）" % (done, n))
+            break
+        ev = order_evidence()
+        if ev and ev[0] != "ordered":
+            # 未確認（或任何非 ordered 的訂單痕跡）⇒ **停手，交人判斷**，絕不重試
+            log("⚠ 帳本出現訂單痕跡但狀態=%s（單號=%s）⇒ 停止重試（避免雙單）；"
+                "請到 Apple 帳戶頁核對" % (ev[0], ev[1] or "(無)"))
             break
         if os.environ.get("DRY_RUN") == "1":
             log("DRY_RUN ⇒ 一發即收工（不下單）")
