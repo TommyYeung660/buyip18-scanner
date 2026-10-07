@@ -1,0 +1,126 @@
+name: iPhone Duo delivery orders (10-way)
+
+# ⚡ 2026-10-07 iPhone Duo 送貨專案（用戶規格）：
+#   · 只做送貨（FULFILLMENT=HOME），不自提、不探庫存
+#   · 10 個 profile、一 profile 一 IP（各自專屬上游代理）並發下單
+#   · buy_count=2、優先序 256→512→1TB→2TB（每個 profile 指定一款，分散 8 款）
+#   · 完整記錄鏈：引擎寫本機帳本 → 本 job 合併推回私有 repo（raw media type、拒絕覆寫歷史）
+# ⚠ 這條鏈與已停用的店取 keeper 艦隊（scanner.yml）**完全無關**、互不影響。
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry=只跑到 review 不下單；live=真的下單"
+        default: "dry"
+      wait_until:
+        description: "起跑時間 ISO8601（留空=立即；例 2026-10-16T20:00:00+08:00）"
+        default: ""
+      deadline_min:
+        description: "單一 job 的總時限（分鐘）"
+        default: "40"
+      profiles:
+        description: "profile 名（逗號分隔；留空=duo01..duo10）"
+        default: ""
+  schedule:
+    # 2026-10-16 19:50 HKT（=11:50 UTC）起跑；job 內會重試到 20:00 預訂開放後成立
+    - cron: "50 11 16 10 *"
+
+concurrency:
+  group: duo-orders
+  cancel-in-progress: false
+
+jobs:
+  duo:
+    name: "duo ${{ matrix.profile }} · ${{ matrix.variant }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        include:
+          - { idx: 0, profile: duo01, sku: "MK2E4ZA/A", variant: "256GB 夜空色" }
+          - { idx: 1, profile: duo02, sku: "MK2D4ZA/A", variant: "256GB 星光白色" }
+          - { idx: 2, profile: duo03, sku: "MK2G4ZA/A", variant: "512GB 夜空色" }
+          - { idx: 3, profile: duo04, sku: "MK2F4ZA/A", variant: "512GB 星光白色" }
+          - { idx: 4, profile: duo05, sku: "MK2J4ZA/A", variant: "1TB 夜空色" }
+          - { idx: 5, profile: duo06, sku: "MK2H4ZA/A", variant: "1TB 星光白色" }
+          - { idx: 6, profile: duo07, sku: "MK2L4ZA/A", variant: "2TB 夜空色" }
+          - { idx: 7, profile: duo08, sku: "MK2K4ZA/A", variant: "2TB 星光白色" }
+          - { idx: 8, profile: duo09, sku: "MK2E4ZA/A", variant: "256GB 夜空色（第 2 路）" }
+          - { idx: 9, profile: duo10, sku: "MK2D4ZA/A", variant: "256GB 星光白色（第 2 路）" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取得結帳引擎（私有 repo）
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${GH_PAT}@github.com/TommyYeung660/buyip18-checkout.git" engine
+          git -C engine log --oneline -1
+          ls engine/auto_duo.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝 Playwright（含瀏覽器）
+        run: |
+          python -m pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+
+      # 敏感值一律落 /tmp + chmod 600（公開 repo 的鐵律：不進 GITHUB_ENV）
+      - name: 準備 secret 檔（profiles / 專屬出口）
+        env:
+          PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
+          SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+          IDX: ${{ matrix.idx }}
+        run: |
+          set -e
+          printf '%s' "$PROFILES_JSON" > /tmp/profiles.json
+          chmod 600 /tmp/profiles.json
+          python3 - <<'PY' > /tmp/proxy.env
+          import json, os
+          i = int(os.environ["IDX"])
+          arr = json.loads(os.environ.get("SLOT_PROXIES_JSON") or "[]")
+          row = (arr[i] if i < len(arr) else []) + ["", "", "", ""]
+          h, p, u, w = row[:4]
+          print("DUO_PROXY_SERVER=%s:%s" % (h, p) if h else "DUO_PROXY_SERVER=")
+          print("DUO_PROXY_USER=%s" % u)
+          print("DUO_PROXY_PASS=%s" % w)
+          print("PROXY_COUNT=%d" % len(arr))
+          PY
+          chmod 600 /tmp/proxy.env
+          grep -c . /tmp/proxy.env >/dev/null
+          python3 -c "import json;print('profiles:',len(json.load(open('/tmp/profiles.json')).get('profiles',[])))"
+
+      - name: 下單（一 profile 一出口，重試到期限）
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          PROFILE: ${{ matrix.profile }}
+          SKU: ${{ matrix.sku }}
+          AUTO_JSON: auto_duo.json
+          FULFILLMENT: HOME
+          BUY_COUNT: "2"
+          ENGINE_DIR: engine
+          DRY_RUN: ${{ github.event.inputs.mode == 'live' && '' || '1' }}
+          DUO_WAIT_UNTIL: ${{ github.event.inputs.wait_until }}
+          DUO_DEADLINE_MIN: ${{ github.event.inputs.deadline_min || '40' }}
+        run: |
+          set -a; . /tmp/proxy.env; set +a
+          export PROFILES_JSON="$(cat /tmp/profiles.json)"
+          echo "profile=$PROFILE sku=$SKU dry_run=${DRY_RUN:-0} proxy=$DUO_PROXY_SERVER"
+          python3 tools/duo_job.py
+        continue-on-error: true
+
+      - name: 結果摘要（帳本尾 + 截圖清單）
+        if: always()
+        run: |
+          echo "---- 本機帳本尾 10 行 ----"
+          tail -10 engine/status/hits.jsonl 2>/dev/null || echo "(無帳本)"
+          echo "---- 截圖 ----"
+          ls -la engine/status/*.png 2>/dev/null | tail -5 || echo "(無截圖)"
+          echo "---- latest.json ----"
+          cat engine/status/latest.json 2>/dev/null | head -c 600 || true

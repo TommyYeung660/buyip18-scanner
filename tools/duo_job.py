@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""iPhone Duo 送貨專案：單一 job 的執行器（10 路並發裡的一路）。
+
+用法（在 runner 上，由 `.github/workflows/duo.yml` 呼叫）：
+    python3 tools/duo_job.py
+
+職責（全部由環境變數驅動，與 checkout.py 解耦）：
+  1. 可選：等到 `DUO_WAIT_UNTIL`（ISO8601，例如 2026-10-16T20:00:00+08:00）前 ~90 秒
+  2. 迴圈跑 `python3 checkout.py`（引擎一次一發）直到：
+       - 引擎回報訂單成立（本機帳本出現 event=order）→ 成功
+       - 或超過 `DUO_DEADLINE_MIN`（預設 25 分鐘）
+     送貨鏈**不缺貨**，所以重試就是晚幾分鐘出貨，不需要毫秒級同步。
+  3. 把本機 `status/hits.jsonl` 的新行**合併**進私有帳本（raw media type＋拒絕覆寫歷史，
+     與掃描器 push_hits_ledger 同一套規則）；截圖由引擎自己在成立/未確認時上傳。
+
+環境變數（必填見註）：
+  ENGINE_DIR     引擎 checkout 目錄（預設 ./engine）
+  PROFILE        * profile 名（對應 PROFILES_JSON 內 name）
+  SKU            * 要買的料號（例 MK2F4ZA/A；留空＝照 AUTO_JSON candidates 順序）
+  AUTO_JSON      預設 auto_duo.json
+  FULFILLMENT    預設 HOME
+  DRY_RUN        "1" 則只跑到 review 不下單
+  PROFILES_JSON  * profiles JSON 字串（secret）
+  GH_PAT         * 私有 repo token（推帳本用）
+  DUO_PROXY_SERVER / DUO_PROXY_USER / DUO_PROXY_PASS  專屬出口（可空⇒直連）
+  DUO_WAIT_UNTIL 例 2026-10-16T20:00:00+08:00（可空）
+  DUO_DEADLINE_MIN 預設 25
+  DUO_LEDGER_REPO  預設 TommyYeung660/buyip18-checkout
+"""
+import base64
+import datetime
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+
+ENGINE = os.environ.get("ENGINE_DIR", "./engine")
+LEDGER_REPO = os.environ.get("DUO_LEDGER_REPO", "TommyYeung660/buyip18-checkout")
+LEDGER_PATH = "status/hits.jsonl"
+API = "https://api.github.com/repos/" + LEDGER_REPO + "/contents/"
+T0 = time.time()
+
+
+def log(m):
+    print("[duo_job %s] %s" % (datetime.datetime.now().strftime("%H:%M:%S"), m), flush=True)
+
+
+def parse_iso(s):
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(s)
+    except Exception:
+        log("DUO_WAIT_UNTIL 解析失敗（%r）— 忽略" % s)
+        return None
+
+
+def wait_until(iso, lead_s=90):
+    t = parse_iso(iso)
+    if not t:
+        return
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
+    fire = t - datetime.timedelta(seconds=lead_s)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    delta = (fire - now).total_seconds()
+    if delta > 0:
+        log("等到 %s（T-0=%s，提前 %ds 起跑）" % (fire.astimezone(t.tzinfo).isoformat(),
+                                                t.isoformat(), lead_s))
+        while delta > 0:
+            time.sleep(min(delta, 30))
+            delta = (fire - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    log("起跑（T-0 目標 %s）" % t.isoformat())
+
+
+def engine_env():
+    e = dict(os.environ)
+    e.setdefault("AUTO_JSON", "auto_duo.json")
+    e.setdefault("FULFILLMENT", "HOME")
+    e.pop("KEEPER", None)          # 這條鏈不是 keeper 模式
+    return e
+
+
+def run_engine_once(n):
+    log("── 第 %d 發：checkout.py（PROFILE=%s SKU=%s DRY_RUN=%s）"
+        % (n, os.environ.get("PROFILE", ""), os.environ.get("SKU", "") or "(候選序)",
+           os.environ.get("DRY_RUN", "")))
+    t = time.time()
+    p = subprocess.run([sys.executable, "-u", "checkout.py"], cwd=ENGINE,
+                       env=engine_env(), capture_output=True, text=True, timeout=1800)
+    tail = (p.stdout or "").strip().splitlines()[-6:]
+    for l in tail:
+        log("   " + l[:160])
+    log("── 第 %d 發結束：exit=%s、耗時 %.0fs" % (n, p.returncode, time.time() - t))
+    return p.returncode
+
+
+def ledger_rows():
+    f = os.path.join(ENGINE, "status", "hits.jsonl")
+    if not os.path.exists(f):
+        return []
+    out = []
+    for line in open(f, encoding="utf-8", errors="replace").read().splitlines():
+        if line.strip().startswith("{"):
+            out.append(line.strip())
+    return out
+
+
+def gh(method, url, data=None, raw=False):
+    pat = (os.environ.get("GH_PAT") or "").strip()
+    if not pat:
+        return None
+    hdr = {"Authorization": "Bearer " + pat,
+           "Accept": "application/vnd.github.raw" if raw else "application/vnd.github+json",
+           "User-Agent": "buyip18-duo"}
+    req = urllib.request.Request(url, method=method,
+                                 data=json.dumps(data).encode() if data else None, headers=hdr)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def push_ledger():
+    """把本機新行合併進私有帳本（同一套規則：raw 讀底稿、讀不到就不推）。"""
+    mine = ledger_rows()
+    if not mine:
+        log("本機無帳本行 ⇒ 不推")
+        return
+    try:
+        base = gh("GET", API + LEDGER_PATH, raw=True) or ""
+    except Exception as e:
+        code = getattr(e, "code", None)
+        if code == 404:
+            base = ""
+        else:
+            log("讀不到遠端帳本（%r）⇒ 本輪不推（避免覆寫歷史）" % (e,))
+            return
+    def key(l):
+        try:
+            d = json.loads(l)
+            return json.dumps([d.get("ts"), d.get("event"), d.get("slot"),
+                               d.get("sku"), d.get("state"), d.get("order_no")],
+                              ensure_ascii=False)
+        except Exception:
+            return l
+    seen, merged = set(), []
+    for line in (base.splitlines() + mine):
+        k = key(line)
+        if k in seen:
+            continue
+        seen.add(k)
+        merged.append(line)
+    if len(merged) <= len(base.splitlines()):
+        log("沒有新行可推（合併後 %d 行）" % len(merged))
+        return
+    body = {"message": "duo: ledger from job %s (profile=%s)" % (
+                os.environ.get("GITHUB_RUN_ID", "local"), os.environ.get("PROFILE", "")),
+            "content": base64.b64encode(("\n".join(merged) + "\n").encode()).decode(),
+            "branch": "main"}
+    try:
+        gh("PUT", API + LEDGER_PATH, data=body)
+        log("帳本已推（合併後 %d 行，新增 %d 行）"
+            % (len(merged), len(merged) - len(base.splitlines())))
+    except Exception as e:
+        log("帳本推送失敗：%r（不影響已成立的訂單）" % (e,))
+
+
+def ordered_ok():
+    for line in ledger_rows():
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("event") == "order" and d.get("state") == "ordered":
+            return d.get("order_no") or "SUBMITTED"
+    return None
+
+
+def main():
+    if not os.environ.get("PROFILE"):
+        log("⛔ 缺 PROFILE")
+        return 2
+    wait_until(os.environ.get("DUO_WAIT_UNTIL", ""))
+    deadline = T0 + int(os.environ.get("DUO_DEADLINE_MIN", "25")) * 60
+    n = 0
+    while True:
+        n += 1
+        try:
+            run_engine_once(n)
+        except subprocess.TimeoutExpired:
+            log("引擎逾時（30 分）⇒ 視為失敗，續試")
+        done = ordered_ok()
+        if done:
+            log("✅ 訂單成立：%s（第 %d 發）" % (done, n))
+            break
+        if os.environ.get("DRY_RUN") == "1":
+            log("DRY_RUN ⇒ 一發即收工（不下單）")
+            break
+        if time.time() > deadline:
+            log("⏰ 超過期限（%s 分鐘）⇒ 收工" % os.environ.get("DUO_DEADLINE_MIN", "25"))
+            break
+        time.sleep(15)
+    push_ledger()
+    log("本 job 結束（共 %d 發）" % n)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
