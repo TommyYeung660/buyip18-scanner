@@ -1,0 +1,108 @@
+name: Duo delivery — single-profile TEST (18 Pro / Duo)
+
+# ⚡ 2026-10-07：M2b 驗收用——**單一 profile**、可選 iPhone 18 Pro 或 iPhone Duo，
+# 先用 DRY_RUN 跑到 review（不建單），再用 live 真下單（未發貨可取消）。
+# 為什麼放在 Actions 而不是本機：profiles（卡號/地址）放在 GitHub secret `PROFILES_JSON`
+# （由手機 App 推送）⇒ 這裡不必把卡片資料帶到本機或對話裡。
+#
+# 用法：
+#   1) 手機 App 設好 1 個 profile（name 例：duo01）並「推送 profiles.json」
+#   2) 這裡 Run workflow：model=18pro、profile=duo01、mode=dry  ⇒ 應停在 review（截圖）
+#   3) 確認無誤後再跑 mode=live ⇒ 真的下一張 18 Pro 送貨單（可取消）驗證全鏈
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "18pro=iPhone 18 Pro Max（驗收用，可取消）／duo=iPhone Duo"
+        default: "18pro"
+      profile:
+        description: "profile 名（要在 PROFILES_JSON 內）"
+        default: "duo01"
+      mode:
+        description: "dry=只到 review；live=真下單"
+        default: "dry"
+      sku:
+        description: "指定料號（留空=照候選序，18pro 預設第一個候選）"
+        default: ""
+      proxy_idx:
+        description: "SLOT_PROXIES_JSON 的索引（用哪個出口；預設 0）"
+        default: "0"
+      deadline_min:
+        description: "總時限（分鐘）"
+        default: "20"
+
+concurrency:
+  group: duo-test
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: "TEST ${{ github.event.inputs.model }} · ${{ github.event.inputs.profile }} · ${{ github.event.inputs.mode }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取得結帳引擎（私有 repo）
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${GH_PAT}@github.com/TommyYeung660/buyip18-checkout.git" engine
+          git -C engine log --oneline -1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝 Playwright（含瀏覽器）
+        run: |
+          python -m pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+
+      - name: 準備 secret 檔（profiles / 出口）
+        env:
+          PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
+          SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+          IDX: ${{ github.event.inputs.proxy_idx }}
+        run: |
+          set -e
+          printf '%s' "$PROFILES_JSON" > /tmp/profiles.json
+          chmod 600 /tmp/profiles.json
+          python3 - <<'PY' > /tmp/proxy.env
+          import json, os
+          i = int(os.environ.get("IDX") or 0)
+          arr = json.loads(os.environ.get("SLOT_PROXIES_JSON") or "[]")
+          row = (arr[i] if i < len(arr) else []) + ["", "", "", ""]
+          h, p, u, w = row[:4]
+          print("DUO_PROXY_SERVER=%s:%s" % (h, p) if h else "DUO_PROXY_SERVER=")
+          print("DUO_PROXY_USER=%s" % u)
+          print("DUO_PROXY_PASS=%s" % w)
+          PY
+          chmod 600 /tmp/proxy.env
+          python3 -c "import json;d=json.load(open('/tmp/profiles.json'));print('profiles:',[p.get('name') for p in d.get('profiles',[])])"
+
+      - name: 跑單一 profile（送貨鏈）
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          PROFILE: ${{ github.event.inputs.profile }}
+          SKU: ${{ github.event.inputs.sku }}
+          AUTO_JSON: ${{ github.event.inputs.model == 'duo' && 'auto_duo.json' || 'auto.json' }}
+          FULFILLMENT: HOME
+          BUY_COUNT: "1"
+          ENGINE_DIR: engine
+          DRY_RUN: ${{ github.event.inputs.mode == 'live' && '' || '1' }}
+          DUO_DEADLINE_MIN: ${{ github.event.inputs.deadline_min || '20' }}
+        run: |
+          set -a; . /tmp/proxy.env; set +a
+          export PROFILES_JSON="$(cat /tmp/profiles.json)"
+          echo "model=$AUTO_JSON profile=$PROFILE dry_run=${DRY_RUN:-0} sku=$SKU proxy=$DUO_PROXY_SERVER"
+          python3 tools/duo_job.py
+        continue-on-error: true
+
+      - name: 結果（帳本尾 / 截圖 / 狀態）
+        if: always()
+        run: |
+          echo "---- 帳本尾 8 行 ----"; tail -8 engine/status/hits.jsonl 2>/dev/null || echo "(無)"
+          echo "---- 截圖 ----"; ls -la engine/status/*.png 2>/dev/null | tail -6 || echo "(無)"
+          echo "---- latest.json ----"; head -c 600 engine/status/latest.json 2>/dev/null || true
