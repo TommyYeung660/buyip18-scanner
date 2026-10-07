@@ -33,6 +33,7 @@ import base64
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -86,6 +87,15 @@ def engine_env():
     return e
 
 
+ORDER_IN_STDOUT = re.compile(r"訂單號\s*=\s*([A-Z]?\d{6,})")
+
+
+def order_from_stdout(text):
+    """雙保險：引擎自己印出來的訂單號。帳本檔有時序/落地問題，stdout 不會騙人。"""
+    m = ORDER_IN_STDOUT.search(text or "")
+    return m.group(1) if m else None
+
+
 def run_engine_once(n):
     log("── 第 %d 發：checkout.py（PROFILE=%s SKU=%s DRY_RUN=%s）"
         % (n, os.environ.get("PROFILE", ""), os.environ.get("SKU", "") or "(候選序)",
@@ -101,7 +111,7 @@ def run_engine_once(n):
     for l in tail:
         log("   " + l[:160])
     log("── 第 %d 發結束：exit=%s、耗時 %.0fs" % (n, p.returncode, time.time() - t))
-    return p.returncode
+    return (p.stdout or "")
 
 
 BASELINE = {"n": None}
@@ -290,6 +300,10 @@ def notify(title, msg, priority=0):
 
 
 def main():
+    # ⚠⚠ 10/07 首戰教訓：BASELINE 必須在**任何一發之前**固定，否則第一發寫下的
+    # `event=order` 會被當成「歷史」而看不到 ⇒ 迴圈以為沒成立 ⇒ 再打一發 ⇒ **雙單**。
+    # 當晚真的發生了：W1948022250（第 1 發）＋ W1518897851（第 2 發）。
+    ledger_rows()
     if not os.environ.get("PROFILE"):
         log("⛔ 缺 PROFILE")
         return 2
@@ -302,10 +316,16 @@ def main():
     n = 0
     while True:
         n += 1
+        out = ""
         try:
-            run_engine_once(n)
+            out = run_engine_once(n) or ""
         except subprocess.TimeoutExpired:
             log("引擎逾時（30 分）⇒ 視為失敗，續試")
+        o = order_from_stdout(out)
+        if o:
+            log("✅ 訂單成立（引擎 stdout）：%s（第 %d 發）" % (o, n))
+            notify("Duo 下單成功", "%s｜訂單 %s" % (os.environ.get("PROFILE", ""), o), priority=1)
+            break
         done = ordered_ok()
         if done:
             log("✅ 訂單成立：%s（第 %d 發）" % (done, n))
