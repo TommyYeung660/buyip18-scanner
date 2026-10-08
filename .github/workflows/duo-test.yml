@@ -30,6 +30,9 @@ on:
       deadline_min:
         description: "總時限（分鐘）"
         default: "20"
+      buy_count:
+        description: "一張單要買幾件（Duo 專案＝2）"
+        default: "1"
 
 concurrency:
   group: duo-test
@@ -94,7 +97,7 @@ jobs:
           SKU: ${{ github.event.inputs.sku }}
           AUTO_JSON: ${{ github.event.inputs.model == 'duo' && 'auto_duo.json' || 'auto.json' }}
           FULFILLMENT: HOME
-          BUY_COUNT: "1"
+          BUY_COUNT: ${{ github.event.inputs.buy_count || '1' }}
           ENGINE_DIR: engine
           HEADLESS: "1"
           # ⚠ GitHub 表達式的空字串是 falsy ⇒ `live && '' || '1'` 恆為 '1'（10/07 實跑抓到的坑：
