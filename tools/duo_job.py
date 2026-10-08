@@ -254,6 +254,32 @@ def push_shots():
             break
 
 
+def resolve_by_index():
+    """⚡ 10/08：改用「路號」定位 profile。
+
+    原因：原本 preflight 產生 matrix 再傳給 duo job，但 GitHub 會擋掉
+    「可能含 secret」的 job output（實測警告：`Skip output 'matrix' since it may contain secret.`
+    ——因為 matrix 裡的 profile 名是從 PROFILES_JSON 推出來的）⇒ matrix 變空 ⇒ 整個 run 失敗。
+    改為：matrix 只帶**路號**（idx，靜態、不含密），每一路在**自己的 job 內**讀 secret 取第 idx 個
+    profile；idx 超出現有數量就安靜結束（＝有幾張卡就跑幾路，且不必傳任何秘密出去）。
+    """
+    raw = os.environ.get("PROFILE_IDX", "").strip()
+    if not raw.isdigit():
+        return None
+    i = int(raw)
+    try:
+        plist = (json.loads(os.environ.get("PROFILES_JSON") or "{}")).get("profiles") or []
+    except Exception:
+        return None
+    if i < 0 or i >= len(plist):
+        log("本路 idx=%d 沒有對應 profile（現有 %d 個）⇒ 結束（正常：有幾張卡就跑幾路）"
+            % (i, len(plist)))
+        return ""
+    nm = str((plist[i] or {}).get("name") or "").strip()
+    log("本路 idx=%d → profile=%s" % (i, nm))
+    return nm
+
+
 def profile_exists():
     """確認 PROFILE 真的在 PROFILES_JSON 內。
 
@@ -299,13 +325,39 @@ def notify(title, msg, priority=0):
         log("通知失敗（不影響流程）：%r" % (e,))
 
 
+def sku_for_index():
+    """依路號配款式（與 tools/duo_preflight.py 的 VARIANTS 同一份；-1＝照設定檔候選序）。"""
+    if os.environ.get("USE_APP_CONFIG") == "1":
+        return ""
+    raw = os.environ.get("PROFILE_IDX", "").strip()
+    if not raw.isdigit():
+        return ""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from duo_preflight import VARIANTS
+        return VARIANTS[int(raw) % len(VARIANTS)][0]
+    except Exception:
+        return ""
+
+
 def main():
     # ⚠⚠ 10/07 首戰教訓：BASELINE 必須在**任何一發之前**固定，否則第一發寫下的
     # `event=order` 會被當成「歷史」而看不到 ⇒ 迴圈以為沒成立 ⇒ 再打一發 ⇒ **雙單**。
     # 當晚真的發生了：W1948022250（第 1 發）＋ W1518897851（第 2 發）。
     ledger_rows()
+    # 路號模式：先解出 profile 名與款式（都不需要跨 job 傳秘密）
+    idx_name = resolve_by_index()
+    if idx_name == "":
+        return 0                     # 這一路沒有 profile ⇒ 正常結束
+    if idx_name:
+        os.environ["PROFILE"] = idx_name
+        if not os.environ.get("SKU"):
+            _sku = sku_for_index()
+            if _sku:
+                os.environ["SKU"] = _sku
+                log("本路 idx=%s 指定款式 SKU=%s" % (os.environ.get("PROFILE_IDX"), _sku))
     if not os.environ.get("PROFILE"):
-        log("⛔ 缺 PROFILE")
+        log("⛔ 缺 PROFILE（也沒給 PROFILE_IDX）")
         return 2
     pe = profile_exists()
     if pe is False:

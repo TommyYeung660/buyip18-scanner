@@ -36,11 +36,9 @@ concurrency:
 
 jobs:
   preflight:
-    name: "preflight（就緒表 ＋ 產生 matrix）"
+    name: "preflight（就緒表）"
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    outputs:
-      matrix: ${{ steps.mk.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - name: 檢查 profiles / 出口形狀（不印值）
@@ -49,27 +47,30 @@ jobs:
           SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
         run: python3 tools/duo_preflight.py
         continue-on-error: true      # 就緒表是給人看的；不足時仍讓各 job 自己判（見 duo_job 的 profile 檢查）
-      - name: 產生 matrix（依**已存在的 profile**；有幾張卡就跑幾路）
-        id: mk
-        env:
-          PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
-          ONLY_PROFILES: ${{ github.event.inputs.profiles }}
-        run: |
-          set -e
-          M=$(python3 tools/duo_preflight.py --matrix)
-          echo "matrix=$M" >> "$GITHUB_OUTPUT"
-          echo "matrix = $M"
 
   duo:
-    name: "duo ${{ matrix.profile }} · ${{ matrix.variant }}"
+    name: "duo slot ${{ matrix.idx }}"
     needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
       fail-fast: false
       max-parallel: 10
+      # ⚡ 10/08：matrix 只帶**路號**（靜態、不含任何秘密）。GitHub 會擋「可能含 secret」的
+      # job output（實測警告 `Skip output 'matrix' since it may contain secret.` ⇒ matrix 變空
+      # ⇒ 整個 run 失敗），所以 profile 名與款式改由**每個 job 自己在 runner 內**讀 secret 決定。
       matrix:
-        include: ${{ fromJson(needs.preflight.outputs.matrix) }}
+        include:
+          - { idx: 0 }
+          - { idx: 1 }
+          - { idx: 2 }
+          - { idx: 3 }
+          - { idx: 4 }
+          - { idx: 5 }
+          - { idx: 6 }
+          - { idx: 7 }
+          - { idx: 8 }
+          - { idx: 9 }
     steps:
       - uses: actions/checkout@v4
 
@@ -124,9 +125,10 @@ jobs:
           BARK_URL: ${{ secrets.BARK_URL }}
           PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
           PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}   # 專案現用 PUSHOVER_*，留著無害
-          PROFILE: ${{ matrix.profile }}
-          # use_app_config=true ⇒ 不傳 SKU，讓引擎照 auto_duo.json 的 candidates 走（App 的下單配置）
-          SKU: ${{ github.event.inputs.use_app_config == 'true' && '' || matrix.sku }}
+          # 路號模式：profile 名（secret 內第 idx 個）與款式（VARIANTS[idx]）都在 runner 內決定
+          PROFILE_IDX: ${{ matrix.idx }}
+          PROFILE: ""
+          SKU: ""
           AUTO_JSON: auto_duo.json
           FULFILLMENT: HOME
           BUY_COUNT: "2"
@@ -138,6 +140,8 @@ jobs:
           DUO_WAIT_UNTIL: ${{ github.event.inputs.wait_until }}
           DUO_DEADLINE_MIN: ${{ github.event.inputs.deadline_min || '40' }}
           DUO_MAX_ATTEMPTS: "3"
+          # use_app_config=true ⇒ 不指定款式，照 auto_duo.json 的 candidates 走（App 的下單配置）
+          USE_APP_CONFIG: ${{ github.event.inputs.use_app_config == 'true' && '1' || '0' }}
         run: |
           set -a; . /tmp/proxy.env; set +a
           export PROFILES_JSON="$(cat /tmp/profiles.json)"
