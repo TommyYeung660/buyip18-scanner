@@ -36,9 +36,11 @@ concurrency:
 
 jobs:
   preflight:
-    name: "preflight（就緒表：profiles × 出口）"
+    name: "preflight（就緒表 ＋ 產生 matrix）"
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - name: 檢查 profiles / 出口形狀（不印值）
@@ -47,6 +49,16 @@ jobs:
           SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
         run: python3 tools/duo_preflight.py
         continue-on-error: true      # 就緒表是給人看的；不足時仍讓各 job 自己判（見 duo_job 的 profile 檢查）
+      - name: 產生 matrix（依**已存在的 profile**；有幾張卡就跑幾路）
+        id: mk
+        env:
+          PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
+          ONLY_PROFILES: ${{ github.event.inputs.profiles }}
+        run: |
+          set -e
+          M=$(python3 tools/duo_preflight.py --matrix)
+          echo "matrix=$M" >> "$GITHUB_OUTPUT"
+          echo "matrix = $M"
 
   duo:
     name: "duo ${{ matrix.profile }} · ${{ matrix.variant }}"
@@ -57,17 +69,7 @@ jobs:
       fail-fast: false
       max-parallel: 10
       matrix:
-        include:
-          - { idx: 0, profile: duo01, sku: "MK2E4ZA/A", variant: "256GB 夜空色" }
-          - { idx: 1, profile: duo02, sku: "MK2D4ZA/A", variant: "256GB 星光白色" }
-          - { idx: 2, profile: duo03, sku: "MK2G4ZA/A", variant: "512GB 夜空色" }
-          - { idx: 3, profile: duo04, sku: "MK2F4ZA/A", variant: "512GB 星光白色" }
-          - { idx: 4, profile: duo05, sku: "MK2J4ZA/A", variant: "1TB 夜空色" }
-          - { idx: 5, profile: duo06, sku: "MK2H4ZA/A", variant: "1TB 星光白色" }
-          - { idx: 6, profile: duo07, sku: "MK2L4ZA/A", variant: "2TB 夜空色" }
-          - { idx: 7, profile: duo08, sku: "MK2K4ZA/A", variant: "2TB 星光白色" }
-          - { idx: 8, profile: duo09, sku: "MK2E4ZA/A", variant: "256GB 夜空色（第 2 路）" }
-          - { idx: 9, profile: duo10, sku: "MK2D4ZA/A", variant: "256GB 星光白色（第 2 路）" }
+        include: ${{ fromJson(needs.preflight.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 

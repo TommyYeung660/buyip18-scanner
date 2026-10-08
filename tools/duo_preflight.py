@@ -16,6 +16,15 @@ import json
 import os
 import sys
 
+# 款式對應表（10 路；依序配給已存在的 profile）：256×2、512×2、1TB×2、2TB×2、再 256×2
+VARIANTS = [
+    ("MK2E4ZA/A", "256GB 夜空色"), ("MK2D4ZA/A", "256GB 星光白色"),
+    ("MK2G4ZA/A", "512GB 夜空色"), ("MK2F4ZA/A", "512GB 星光白色"),
+    ("MK2J4ZA/A", "1TB 夜空色"), ("MK2H4ZA/A", "1TB 星光白色"),
+    ("MK2L4ZA/A", "2TB 夜空色"), ("MK2K4ZA/A", "2TB 星光白色"),
+    ("MK2E4ZA/A", "256GB 夜空色（第 2 路）"), ("MK2D4ZA/A", "256GB 星光白色（第 2 路）"),
+]
+
 NEED = [("first_name", "名"), ("last_name", "姓"), ("email", "email"), ("phone", "電話"),
         ("card_number", "卡號"), ("card_expiry", "到期"), ("card_cvv", "CVV"),
         ("billing_line1", "送貨地址")]
@@ -61,7 +70,37 @@ def mask(v, keep=2):
     return "" if not v else ("*" * max(0, len(v) - keep) + v[-keep:])
 
 
+def emit_matrix(profiles_json, only=""):
+    """輸出 GitHub Actions 的 matrix JSON（依**已存在的 profile**，不是硬編 duo01..duo10）。
+
+    ⚡ 10/08：用戶把 profile 名改成「First + Last」⇒ 硬編名字再也對不上；
+    而且有幾張卡就跑幾路才是對的（今天 2 張、10/14 之後 10 張）。
+    `only`（逗號分隔）＝只跑這些名字（順序照給）。
+    """
+    try:
+        plist = (json.loads(profiles_json or "{}")).get("profiles") or []
+    except Exception:
+        plist = []
+    names = []
+    for p in plist:
+        nm = str((p or {}).get("name") or "").strip()
+        if nm:
+            names.append(nm)
+    want = [x.strip() for x in str(only or "").split(",") if x.strip()]
+    if want:
+        names = [n for n in want if n in names] or [n for n in want]
+    out = []
+    for i, nm in enumerate(names[:10]):
+        sku, variant = VARIANTS[i % len(VARIANTS)]
+        out.append({"idx": i, "profile": nm, "sku": sku, "variant": variant})
+    return out
+
+
 def main() -> int:
+    if "--matrix" in sys.argv:
+        print(json.dumps(emit_matrix(os.environ.get("PROFILES_JSON"),
+                                     os.environ.get("ONLY_PROFILES", ""))))
+        return 0
     prof = {}
     try:
         prof = json.loads(os.environ.get("PROFILES_JSON") or "{}")
