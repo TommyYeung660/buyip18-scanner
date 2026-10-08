@@ -100,6 +100,11 @@ jobs:
           BUY_COUNT: ${{ github.event.inputs.buy_count || '1' }}
           ENGINE_DIR: engine
           HEADLESS: "1"
+          # ⚡ 10/08：入袋是**機率閘**（今天 2 路彩排各 1 發都遇到 http200 但無結帳標記）
+          # ⇒ 把重載/重試次數拉高（生產舊值 3/3 太保守）。
+          ADD_RETRY_ROUNDS: "6"
+          ADD_RETRY_RELOAD_UNTIL: "10"
+          ADD_RETRY_WAIT_S: "6"
           # ⚠ GitHub 表達式的空字串是 falsy ⇒ `live && '' || '1'` 恆為 '1'（10/07 實跑抓到的坑：
           # 明明選 live 卻 dry）。改用明確的兩態值：dry⇒true、live⇒false。
           DRY_RUN: ${{ github.event.inputs.mode == 'dry' && 'true' || 'false' }}
