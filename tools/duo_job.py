@@ -395,8 +395,13 @@ def main():
                    % (os.environ.get("PROFILE", ""), os.environ.get("SKU", "")))
             break
         ev = order_evidence()
+        if ev and ev[0] == "declined":
+            # ⚡ 10/09：「被拒」＝**確定沒成立**（發卡機構回絕，Apple 頁面明講）⇒ 可以安全重試，
+            # 不必把整輪收掉。多次嘗試正是用戶要的（有時銀行端是暫時性的）。
+            log("↻ 本發被拒（%s）⇒ 繼續下一發（不影響雙單防護：被拒沒有訂單）" % (ev[1] or "declined"))
+            continue
         if ev and ev[0] != "ordered":
-            # 未確認（或任何非 ordered 的訂單痕跡）⇒ **停手，交人判斷**，絕不重試
+            # 未確認（或任何非 ordered 的痕跡）⇒ **停手，交人判斷**，絕不重試
             log("⚠ 帳本出現訂單痕跡但狀態=%s（單號=%s）⇒ 停止重試（避免雙單）；"
                 "請到 Apple 帳戶頁核對" % (ev[0], ev[1] or "(無)"))
             notify("Duo 下單結果：%s" % ev[0],

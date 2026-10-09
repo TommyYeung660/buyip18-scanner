@@ -33,6 +33,9 @@ on:
       buy_count:
         description: "一張單要買幾件（Duo 專案＝2）"
         default: "1"
+      max_attempts:
+        description: "最多試幾發（被拒會自動續試；未確認一律停手）"
+        default: "3"
 
 concurrency:
   group: duo-test
@@ -109,6 +112,7 @@ jobs:
           # 明明選 live 卻 dry）。改用明確的兩態值：dry⇒true、live⇒false。
           DRY_RUN: ${{ github.event.inputs.mode == 'dry' && 'true' || 'false' }}
           DUO_DEADLINE_MIN: ${{ github.event.inputs.deadline_min || '20' }}
+          DUO_MAX_ATTEMPTS: ${{ github.event.inputs.max_attempts || '3' }}
         run: |
           set -a; . /tmp/proxy.env; set +a
           export PROFILES_JSON="$(cat /tmp/profiles.json)"
