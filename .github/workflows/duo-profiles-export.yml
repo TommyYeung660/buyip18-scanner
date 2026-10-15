@@ -1,0 +1,56 @@
+name: Duo profiles export (一次：給插件匯入用)
+
+# ⚡ 10/15 用戶要求：插件的多 profile 要能「直接導入艦隊 repo 上的 profile json」。
+# 但 profiles 自 10/07 起改存 GitHub **secret**（`PROFILES_JSON`，repo 讀不到、連我也讀不到）
+# ⇒ 用這支工作流把 secret 原樣寫成一份 JSON 到**私有** repo，供用戶下載後匯入插件 dashboard。
+#
+# ⚠ 這份檔案含**完整卡號/CVV**（與 secret 同等敏感）：
+#   · 只寫私有 repo `TommyYeung660/buyip18-checkout` 的 `status/profiles-export.json`
+#   · 公開 repo 一個字都不放；log 只印筆數
+#   · 匯入插件後如果要，我可以把它移走（改放進 `attic/` 或換成遮罩版）
+on:
+  workflow_dispatch:
+    inputs:
+      mask:
+        description: "true=只匯出遮罩版（無卡號/CVV，僅供核對）；false=完整版（供匯入）"
+        default: "false"
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: 匯出（寫私有 repo）
+        env:
+          PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
+          GH_PAT: ${{ secrets.CHECKOUT_PAT }}
+          MASK: ${{ github.event.inputs.mask }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -e
+          python3 - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, "tools")
+          from duo_job import push_private_json
+          raw = os.environ.get("PROFILES_JSON") or "{}"
+          d = json.loads(raw)
+          n = len(d.get("profiles") or [])
+          if os.environ.get("MASK") == "true":
+              keep_out = ("card_number", "card_cvv")
+              profs = []
+              for p in (d.get("profiles") or []):
+                  q = {k: v for k, v in p.items() if k not in keep_out}
+                  cn = str(p.get("card_number") or "")
+                  q["card_number_masked"] = ("*" * max(0, len(cn) - 4) + cn[-4:]) if cn else ""
+                  q["card_cvv_set"] = bool(str(p.get("card_cvv") or ""))
+                  profs.append(q)
+              d = {"profiles": profs, "note": "遮罩版（無卡號/CVV）"}
+              name = "status/profiles-export-masked.json"
+          else:
+              d["_note"] = ("完整版：含卡號/CVV，與 GitHub secret 同等敏感。"
+                            "下載後匯入插件 dashboard，匯入完請把這個檔案移走。來源 run: " + os.environ.get("RUN_URL", ""))
+              name = "status/profiles-export.json"
+          ok = push_private_json(name, d, "profiles export (%d 筆, mask=%s)" % (n, os.environ.get("MASK")))
+          print("匯出筆數:", n, "→", name, "推送", "成功" if ok else "失敗")
+          PY
