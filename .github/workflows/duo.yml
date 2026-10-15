@@ -57,6 +57,15 @@ on:
       proxy_map:
         description: "出口索引循環表（例 0,1,2,3,4 ⇒ 路 i 用第 i%5 個出口）—出口不足時分兩波跑"
         default: ""
+      arm_url:
+        description: "開賣偵測要輪詢的商品頁 URL（留空=照 auto_json 的 model_slug 推導）"
+        default: ""
+      arm_poll:
+        description: "開賣偵測輪詢間隔秒數（預設 3）"
+        default: "3"
+      arm_timeout:
+        description: "開賣偵測最多等幾秒（預設 900=15 分鐘；逾時就 fail-open 交給引擎重試）"
+        default: "900"
       add_mode:
         description: "入袋方式：留空=頁面內 fetch（預設）；ui=真 UI 點擊（選規格＋按加入購物袋）"
         default: ""
@@ -228,6 +237,10 @@ jobs:
           DUO_LINE_MARKER: ${{ github.event.inputs.line_marker }}
           # 入袋方式（空=頁面內 fetch；ui=真 UI 點擊）
           ADD_MODE: ${{ github.event.inputs.add_mode }}
+          # ⚡ 10/15：開賣不準時的保險——先便宜輪詢等商品頁真的活了，才啟動引擎
+          DUO_ARM_URL: ${{ github.event.inputs.arm_url }}
+          DUO_ARM_POLL_S: ${{ github.event.inputs.arm_poll || '3' }}
+          DUO_ARM_TIMEOUT_S: ${{ github.event.inputs.arm_timeout || '900' }}
         run: |
           set -a; . /tmp/proxy.env; set +a
           export PROFILES_JSON="$(cat /tmp/profiles.json)"

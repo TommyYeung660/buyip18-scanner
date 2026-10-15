@@ -79,6 +79,100 @@ def wait_until(iso, lead_s=90):
     log("起跑（T-0 目標 %s）" % t.isoformat())
 
 
+def arm_url():
+    """要輪詢「開賣了沒」的商品頁 URL。
+
+    優先序：DUO_ARM_URL（workflow input `product_url`）→ 由引擎的 AUTO_JSON 推導
+    （`model_slug` ⇒ https://www.apple.com/hk-zh/shop/<slug>）。
+    """
+    u = (os.environ.get("DUO_ARM_URL") or "").strip()
+    if u:
+        return u
+    try:
+        slug = json.loads(open(os.path.join(ENGINE, os.environ.get("AUTO_JSON", "auto_duo.json")),
+                               encoding="utf-8").read()).get("model_slug")
+        if slug:
+            return "https://www.apple.com/hk-zh/shop/" + str(slug).strip("/")
+    except Exception:
+        pass
+    return ""
+
+
+# 「還沒開賣」的**網頁字樣**（10/15 實測：Duo 頁的 hero 寫「10 月 16 日晚上 8 時起接受預訂」，
+# 而可買的 18 Pro 頁完全沒有這些字）。判準是**負向**的：字樣還在 ⇒ 續等；字樣消失 ⇒ 開賣。
+# ⚠ 10/15 實測過的**誤判字樣**：「稍後再回來」在**可買頁也有**（行銷文案）⇒ 不可用。
+# 下面這組是逐字在真站比對過的：要嘛「未開賣頁有、可買頁沒有」，要嘛「兩頁都沒有
+# （只會在等候頁出現時才觸發）」。
+ARM_NOTLIVE = ("起接受預訂", "接受預訂", "預訂", "即將推出", "請耐心", "請稍候", "敬請期待",
+               "很快開賣", "暫未發售", "Coming soon", "Check back", "We'll be back")
+# 商品頁有沒有「配置器」＝頁面本身是商品頁（不是 404／sorry／等候頁）
+ARM_PAGE_OK = ('"partNumber"', "dimensionColor")
+
+
+def arm_until_live():
+    """**開賣不準時**的第二道保險：先用便宜的 HTTP 輪詢等商品頁真的活了，才啟動引擎。
+
+    為什麼不能在引擎裡等：引擎每一次入袋嘗試要 ~3 分鐘（6 輪重載＋等待），而每路的
+    重試預算是有限的（DUO_MAX_ATTEMPTS）。若 20:00 其實 20:03 才開賣，頭一兩發就白燒掉。
+
+    怎麼判斷「活了」：HTTP GET 商品頁（~500KB）本身就帶 `partNumber`／`dimensionColor`／
+    `add-to-cart`（10/15 實測：**初始 HTML 就有**，不必等 JS）⇒ 3 秒一輪即可。
+    走**本路的專屬出口**（與稍後引擎同一個 IP，不會出現「輪詢一個 IP、下單另一個 IP」）。
+
+    fail-open：連續失敗 30 次或逾時 ⇒ 直接交給引擎原本的重試（行為與今天相同，不會更差）。
+    """
+    url = arm_url()
+    if not url:
+        return None
+    poll = float(os.environ.get("DUO_ARM_POLL_S", "3") or 3)
+    timeout = float(os.environ.get("DUO_ARM_TIMEOUT_S", "900") or 900)
+    srv = (os.environ.get("DUO_PROXY_SERVER") or "").strip()
+    op = urllib.request.build_opener()
+    if srv:
+        if "://" not in srv:
+            srv = "http://" + srv
+        u = (os.environ.get("DUO_PROXY_USER") or "").strip()
+        w = (os.environ.get("DUO_PROXY_PASS") or "").strip()
+        if u:
+            srv = srv.replace("://", "://%s:%s@" % (urllib.parse.quote(u, safe=""),
+                                                   urllib.parse.quote(w, safe="")), 1)
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({"http": srv, "https": srv}))
+    op.addheaders = [("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36"),
+                     ("Accept-Language", "zh-HK,zh;q=0.9,en;q=0.8")]
+    log("⏳ 開賣偵測：每 %.1fs 輪詢 %s（最多 %.0fs；走本路出口）" % (poll, url, timeout))
+    t0, errs, seen_wait, n = time.time(), 0, [], 0
+    while time.time() - t0 < timeout:
+        n += 1
+        try:
+            with op.open(url, timeout=25) as r:
+                html = r.read().decode("utf-8", "replace")
+            _notlive = [k for k in ARM_NOTLIVE if k in html]
+            if (not _notlive) and any(k in html for k in ARM_PAGE_OK):
+                if seen_wait:
+                    log("🟢 商品頁已開賣（等了 %.1fs／%d 輪；等候頁字樣曾見：%s）"
+                        % (time.time() - t0, n, ",".join(seen_wait[:3])))
+                else:
+                    log("🟢 商品頁已開賣（等了 %.1fs／%d 輪）" % (time.time() - t0, n))
+                return True
+            w0 = _notlive
+            if w0 and not seen_wait:
+                seen_wait.extend(w0)
+                log("⏳ 仍是未開賣頁（字樣：%s）⇒ 續等（第 %d 輪，已等 %.0fs）"
+                    % (",".join(w0[:3]), n, time.time() - t0))
+            errs = 0
+        except Exception as e:
+            errs += 1
+            if errs in (1, 5, 20):
+                log("⚠ 開賣輪詢失敗第 %d 次：%r" % (errs, repr(e)[:70]))
+            if errs >= 30:
+                log("⚠ 開賣輪詢連續失敗 30 次 ⇒ fail-open：交給引擎原本的重試")
+                return None
+        time.sleep(poll)
+    log("⏰ 開賣輪詢逾時（%.0fs）⇒ fail-open：交給引擎原本的重試" % timeout)
+    return None
+
+
 def engine_env():
     e = dict(os.environ)
     e.setdefault("AUTO_JSON", "auto_duo.json")
@@ -648,6 +742,7 @@ def main():
                % os.environ.get("PROFILE_IDX", "?"))
         return 11
     wait_until(os.environ.get("DUO_WAIT_UNTIL", ""))
+    arm_until_live()
     deadline = T0 + int(os.environ.get("DUO_DEADLINE_MIN", "25")) * 60
     n = 0
     last_out = ""
