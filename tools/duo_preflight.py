@@ -113,6 +113,11 @@ def main() -> int:
         proxies = json.loads(os.environ.get("SLOT_PROXIES_JSON") or "[]")
     except Exception as e:
         print("⚠ SLOT_PROXIES_JSON 解析失敗：%r" % (e,))
+    # ⚡ 10/15：舊 5 ＋ 新 5 兩組 secret 串成一份（合併只能在 runner 內做）
+    try:
+        proxies = list(proxies) + list(json.loads(os.environ.get("SLOT_PROXIES_JSON_NEW") or "[]"))
+    except Exception:
+        pass
 
     print("=== 就緒表（公開 repo log ⇒ 只印編號與尾碼，不印姓名/email/地址；帶姓名的遮罩表在私有 repo）===")
     problems = []
@@ -122,6 +127,7 @@ def main() -> int:
         label = "#%d" % (i + 1)          # 公開 log 一律用編號代表 profile
         miss = [zh for k, zh in NEED if not str(p.get(k) or "").strip()]
         dup = []
+        dup_hard = False          # 卡號／email 重複＝硬問題；**地址**重複＝提醒（用戶 10/15 決定不改）
         for key, store, label2 in (("card_number", seen_cards, "卡號"), ("billing_line1", seen_addr, "地址"),
                                    ("email", seen_names, "email")):
             v = str(p.get(key) or "").strip()
@@ -129,13 +135,15 @@ def main() -> int:
                 continue
             if v in store:
                 dup.append("%s 與 #%d 相同" % (label2, store[v] + 1))
+                if label2 != "地址":
+                    dup_hard = True
             else:
                 store[v] = i
         # ⚡ 10/07 實跑教訓：卡號若**填錯一位**，Apple 會在前端就回「請輸入有效的信用卡號碼」
         # （Billing 卡住、整輪白跑）。這在 20:00 當晚是不可接受的失敗 ⇒ 出貨前先用 Luhn 檢查。
         bad_card = bool(str(p.get("card_number") or "").strip()) and not luhn_ok(p.get("card_number"))
         bad_exp = bool(str(p.get("card_expiry") or "").strip()) and not expiry_ok(p.get("card_expiry"))
-        flag = "✅" if not miss and not dup and not bad_card and not bad_exp else "❌"
+        flag = "✅" if not miss and not dup_hard and not bad_card and not bad_exp else "❌"
         print("  %s %-5s 卡=%s%s 到期=%s%s 地址=%s%s%s"
               % (flag, label, mask(p.get("card_number")),
                  "（Luhn 不通過）" if bad_card else "",
@@ -143,10 +151,10 @@ def main() -> int:
                  "（格式/已過期）" if bad_exp else "",
                  mask(p.get("billing_line1"), 4),
                  ("  缺：" + "/".join(miss)) if miss else "",
-                 ("  ⚠重複：" + "；".join(dup)) if dup else ""))
+                 ("  " + ("⛔重複：" if dup_hard else "⚠提醒(地址重複)：") + "；".join(dup)) if dup else ""))
         if miss:
             problems.append("%s 缺 %s" % (label, "/".join(miss)))
-        if dup:
+        if dup_hard:
             problems.append("%s %s" % (label, "；".join(dup)))
         if bad_card:
             problems.append("%s 卡號 Luhn 檢查不通過（尾 %s）——Apple 前端會直接拒，請重新核對數字"

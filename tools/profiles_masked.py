@@ -170,7 +170,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="")
     a = ap.parse_args()
-    d = build(os.environ.get("PROFILES_JSON"), os.environ.get("SLOT_PROXIES_JSON"))
+    _px = os.environ.get("SLOT_PROXIES_JSON") or "[]"
+    try:   # 10/15：兩組 secret 串成一份（合併只能在 runner 內做）
+        _a = json.loads(_px or "[]") + json.loads(os.environ.get("SLOT_PROXIES_JSON_NEW") or "[]")
+        _px = json.dumps(_a)
+    except Exception:
+        pass
+    d = build(os.environ.get("PROFILES_JSON"), _px)
     stdout_summary(d)
     if a.out:
         with open(a.out, "w", encoding="utf-8") as f:

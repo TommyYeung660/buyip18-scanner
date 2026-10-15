@@ -21,6 +21,7 @@ jobs:
         env:
           PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
           SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+          SLOT_PROXIES_JSON_NEW: ${{ secrets.SLOT_PROXIES_JSON_NEW }}
         run: python3 tools/duo_preflight.py
 
       - name: 遮罩表 → 私有 repo（供用戶核對）
@@ -28,6 +29,7 @@ jobs:
         env:
           PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
           SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+          SLOT_PROXIES_JSON_NEW: ${{ secrets.SLOT_PROXIES_JSON_NEW }}
           GH_PAT: ${{ secrets.CHECKOUT_PAT }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |

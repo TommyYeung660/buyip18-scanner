@@ -155,6 +155,7 @@ jobs:
         env:
           PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
           SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+          SLOT_PROXIES_JSON_NEW: ${{ secrets.SLOT_PROXIES_JSON_NEW }}
           IDX: ${{ matrix.idx }}
           PROXY_MAP: ${{ github.event.inputs.proxy_map }}
         run: |
@@ -165,9 +166,16 @@ jobs:
           import json, os
           i = int(os.environ["IDX"])
           arr = json.loads(os.environ.get("SLOT_PROXIES_JSON") or "[]")
+          # ⚡ 10/15：**兩組 secret 串成一份清單**（舊 5 個 ＋ 新買 5 個 = 10 個出口）。
+          # 為什麼要這樣：舊那 5 組的帳密只有 GitHub secret 裡有（連我也讀不到），
+          # 所以「合併」只能在 runner 內做；這樣 10 路就真的是一 profile 一出口。
+          try:
+              arr = list(arr) + list(json.loads(os.environ.get("SLOT_PROXIES_JSON_NEW") or "[]"))
+          except Exception:
+              pass
           # 形狀＝list of dict：{"host","port","user","pass"}（與 scanner.yml 的
           # per-slot listener 生成同一份 secret）
-          # ⚡ 10/15：出口不足時用 PROXY_MAP 讓同幾個乾淨出口**循環**給不同路用
+          # 出口不足時也可用 PROXY_MAP 讓同幾個乾淨出口**循環**給不同路用
           # （配 slots 分兩波跑：先 slots=0,1,2,3,4，再 slots=5,6,7,8,9）
           _m = [x for x in (os.environ.get("PROXY_MAP") or "").replace(" ", "").split(",") if x.isdigit()]
           j = int(_m[i % len(_m)]) if _m else i

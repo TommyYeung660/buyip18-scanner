@@ -69,6 +69,7 @@ jobs:
         env:
           PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
           SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+          SLOT_PROXIES_JSON_NEW: ${{ secrets.SLOT_PROXIES_JSON_NEW }}
           IDX: ${{ github.event.inputs.proxy_idx }}
         run: |
           set -e
@@ -78,6 +79,11 @@ jobs:
           import json, os
           i = int(os.environ.get("IDX") or 0)
           arr = json.loads(os.environ.get("SLOT_PROXIES_JSON") or "[]")
+          # 10/15：舊 5 ＋ 新 5 兩組 secret 串成 10 個出口（合併只能在 runner 內做）
+          try:
+              arr = list(arr) + list(json.loads(os.environ.get("SLOT_PROXIES_JSON_NEW") or "[]"))
+          except Exception:
+              pass
           # 形狀＝list of dict：{"host","port","user","pass"}（與 scanner.yml 的
           # per-slot listener 生成同一份 secret）
           row = arr[i] if i < len(arr) else {}
