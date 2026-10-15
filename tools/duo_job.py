@@ -339,6 +339,9 @@ DUMMY_ADDR = [
     "Flat 7A, 14/F, Belvedere Garden Block 2, Tsuen Wan",
     "Room 505, 5/F, Laguna City Block 21, Lam Tin",
 ]
+# 姓名用**純字母**（有些表單會擋數字）且每路不同（避免第 5 路起被當成同一顧客）
+DUMMY_LAST = ["ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO",
+              "FOXTROT", "GOLF", "HOTEL", "INDIA", "JULIET"]
 
 
 def dummy_profiles(n=10):
@@ -346,11 +349,11 @@ def dummy_profiles(n=10):
     out = []
     for i in range(n):
         brand, pan, exp, cvv = DUMMY_CARDS[i % len(DUMMY_CARDS)]
-        nm = "DUMMY %02d" % (i + 1)
+        last = DUMMY_LAST[i % len(DUMMY_LAST)]
         out.append({
-            "name": nm,
+            "name": "TEST %s" % last,
             "first_name": "TEST",
-            "last_name": "DUMMY%02d" % (i + 1),
+            "last_name": last,
             "email": "duo.dummy%02d@example.com" % (i + 1),
             "phone": "5123%04d" % (i + 1),
             "card_number": pan,
