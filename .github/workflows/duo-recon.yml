@@ -1,0 +1,69 @@
+name: Duo recon (page watch / 臨場應變)
+
+# ⚡ 10/15（用戶第 4 點）：開賣前後 Apple 隨時可能把商品頁換成等候頁、URL 與 DOM 也可能臨時改變。
+# 這支工作流是**當晚的臨場眼睛**：數十秒內回答「現在頁面是什麼、還能不能買、DOM/SKU 有沒有變」。
+#
+#   · 只讀網頁，不下單、不碰 profile、不改任何狀態
+#   · 結果推**私有** repo（status/recon/*、status/recon-latest.json）＋公開 log 只印摘要
+#   · watch_min>0 ⇒ 持續監看，只在「判類改變（等候頁→開賣頁…）」時推檔並標記
+#
+# 當晚建議用法：
+#   19:00 起：mode=watch、label=t1930、watch_min=40、interval_s=30、proxy_idx=0
+#   20:00 前後：log 出現 verdict=configurator ⇒ 商品頁活了 ⇒ 立刻開 duo.yml
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "標籤（例 t1945；用在檔名）"
+        default: "recon"
+      urls:
+        description: "逗號分隔 URL（留空=內建三條候選梯：hk-zh／hk／select）"
+        default: ""
+      proxy_idx:
+        description: "用 SLOT_PROXIES_JSON 的第幾個出口（留空=直連 runner）"
+        default: ""
+      watch_min:
+        description: "持續監看幾分鐘（0=只跑一輪）"
+        default: "0"
+      interval_s:
+        description: "監看間隔（秒）"
+        default: "30"
+      wait_s:
+        description: "每頁載入後等幾秒（等 JS 水合完）"
+        default: "6"
+      save_html:
+        description: "true=連 HTML（gzip）一起推私有 repo（比對 DOM 變化用）"
+        default: "false"
+
+concurrency:
+  group: duo-recon
+  cancel-in-progress: false
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安裝 Playwright（含瀏覽器）
+        run: |
+          python -m pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+      - name: 偵察 / 監看
+        env:
+          GH_PAT: ${{ secrets.CHECKOUT_PAT }}
+          SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+          URLS: ${{ github.event.inputs.urls }}
+          PROXY_IDX: ${{ github.event.inputs.proxy_idx }}
+        run: |
+          set -e
+          echo "label=${{ github.event.inputs.label }} watch_min=${{ github.event.inputs.watch_min }} proxy_idx=${{ github.event.inputs.proxy_idx }}"
+          python3 tools/duo_recon.py \
+            --label "${{ github.event.inputs.label }}" \
+            --watch-min "${{ github.event.inputs.watch_min }}" \
+            --interval-s "${{ github.event.inputs.interval_s }}" \
+            --wait-s "${{ github.event.inputs.wait_s }}" \
+            ${{ github.event.inputs.save_html == 'true' && '--save-html' || '' }}

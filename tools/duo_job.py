@@ -425,26 +425,33 @@ def summarize_out(text):
     return d
 
 
-def push_private_json(name, obj, message):
-    """把一份 JSON 推到**私有** repo（公開 repo 一個字都不放）。失敗只記 log，不影響流程。"""
+def push_private_bytes(name, blob, message):
+    """把**二進位**檔推到**私有** repo（截圖、gzip HTML）——GitHub 上可直接看圖。
+
+    公開 repo 一個字都不放。失敗只記 log，不影響流程。
+    """
     pat = (os.environ.get("GH_PAT") or os.environ.get("CHECKOUT_PAT") or "").strip()
     if not pat:
         return False
     try:
-        content = json.dumps(obj, ensure_ascii=False, indent=1)
-        body = {"message": message, "content": base64.b64encode(content.encode()).decode(),
-                "branch": "main"}
+        body = {"message": message,
+                "content": base64.b64encode(blob).decode(), "branch": "main"}
         try:
             meta = gh("GET", API + name) or "{}"
             body["sha"] = json.loads(meta).get("sha", "")
         except Exception:
             pass
         gh("PUT", API + name, data=body)
-        log("證據已推（私有）：%s" % name)
+        log("已推（私有）：%s（%d bytes）" % (name, len(blob)))
         return True
     except Exception as e:
-        log("證據推送失敗 %s：%r" % (name, e))
+        log("推送失敗 %s：%r" % (name, e))
         return False
+
+
+def push_private_json(name, obj, message):
+    return push_private_bytes(name, json.dumps(obj, ensure_ascii=False, indent=1).encode(),
+                              message)
 
 
 def record_dry_evidence(idx, summary, out_text):
@@ -476,6 +483,62 @@ def record_dry_evidence(idx, summary, out_text):
     ev["verdict"] = "PASS" if ok else ("ORDER?" if summary.get("order_no") else "FAIL")
     push_private_json("status/dry-%s-slot%02d.json" % (run_id, idx), ev,
                       "dry rehearsal slot %02d (profile=%s)" % (idx, os.environ.get("PROFILE", "")))
+
+
+def profile_obj():
+    """取出本路要用的 profile（dict）。"""
+    want = os.environ.get("PROFILE") or ""
+    try:
+        plist = (json.loads(os.environ.get("PROFILES_JSON") or "{}")).get("profiles") or []
+    except Exception:
+        return {}
+    for p in plist:
+        if str((p or {}).get("name") or "") == want:
+            return p or {}
+    return {}
+
+
+def already_ordered(window_h=None):
+    """私有帳本內，**這個 profile**（以 email 識別）最近是否已有成立的訂單。
+
+    ⚠ 當晚最危險的失敗模式不是「買不到」，而是**同一張卡被下第二次單**：
+    例如第一輪 10 路有 6 路成功，之後我為了救失敗的路再 dispatch 一次整批——
+    那 6 路就會各自再下一單（Apple 端可能兩張都保留 ⇒ 重複扣款/超買）。
+    引擎自己的 BASELINE 只擋「同一個 run 內」的重複，擋不了跨 run。這一支就是跨 run 的閘。
+    """
+    p = profile_obj()
+    email = str(p.get("email") or "").strip().lower()
+    if not email:
+        return None
+    try:
+        raw = gh("GET", API + LEDGER_PATH, raw=True) or ""
+    except Exception as e:
+        log("⚠ 讀不到遠端帳本（%r）⇒ 無法確認是否已有訂單（照跑，但請人工留意）" % (e,))
+        return None
+    hrs = float(window_h or os.environ.get("REPEAT_WINDOW_H", "12") or 12)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    hits = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("event") != "order" or d.get("state") != "ordered":
+            continue
+        if str(d.get("email") or "").strip().lower() != email:
+            continue
+        try:
+            t = datetime.datetime.fromisoformat(str(d.get("ts")))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=datetime.timezone.utc)
+        except Exception:
+            t = None                      # 時間讀不出來 ⇒ 保守當成「就是它」
+        if t is None or (now - t).total_seconds() <= hrs * 3600:
+            hits.append(d)
+    return hits or None
 
 
 def notify(title, msg, priority=0):
@@ -541,6 +604,16 @@ def main():
     if pe is False:
         notify("Duo job 中止", "PROFILE=%s 不在 PROFILES_JSON 內" % os.environ.get("PROFILE"))
         return 3
+    # 🛡 跨 run 的雙單閘（當晚重跑失敗路時最容易踩；ALLOW_REPEAT=1 可刻意繞過）
+    if str(os.environ.get("ALLOW_REPEAT", "")).strip() != "1":
+        _dup = already_ordered()
+        if _dup:
+            _no = _dup[0].get("order_no") or "(單號讀不到)"
+            log("⛔ 私有帳本顯示本 profile 最近已有成立訂單（%s）⇒ 拒跑（防同一張卡下第二次單）；"
+                "若確定要再下一單請設 ALLOW_REPEAT=1" % _no)
+            notify("Duo job 拒跑（已有訂單）",
+                   "%s｜已有訂單 %s ⇒ 未再下單" % (os.environ.get("PROFILE", ""), _no), priority=-1)
+            return 10
     wait_until(os.environ.get("DUO_WAIT_UNTIL", ""))
     deadline = T0 + int(os.environ.get("DUO_DEADLINE_MIN", "25")) * 60
     n = 0
