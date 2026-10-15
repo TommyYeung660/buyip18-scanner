@@ -25,6 +25,26 @@ on:
       profiles:
         description: "profile 名（逗號分隔；留空=duo01..duo10）"
         default: ""
+      # ⚡ 10/15：以下旋鈕是為「當晚臨場應變」加的——GitHub 改 workflow env 要 commit，
+      # 但 workflow_dispatch 的 input 不用 ⇒ 當晚任何調整都走 input，不改碼。
+      auto_json:
+        description: "引擎設定檔（auto_duo.json=iPhone Duo；auto.json=iPhone 18 Pro 彩排）"
+        default: "auto_duo.json"
+      dummy:
+        description: "🧪 true=用假資料（公開測試卡號）跑彩排，絕不碰真 profile；必須配 mode=dry"
+        default: "false"
+      buy_count:
+        description: "一張單幾件（Duo 專案＝2）"
+        default: "2"
+      max_attempts:
+        description: "每路最多幾發（被拒會續試；未確認一律停手）"
+        default: "3"
+      add_rounds:
+        description: "入袋重試輪數（機率閘；當晚不夠就往上加）"
+        default: "6"
+      add_reload:
+        description: "每輪最多重載商品頁幾次"
+        default: "10"
   # ⏸ 2026-10-07 用戶指示「先暫停一切任務」⇒ 定時觸發**先關掉**，避免 10/16 自動開火
   # （卡未就緒、10 組 profile/出口未備妥）。恢復時把下面兩行取消註解即可：
   # schedule:
@@ -82,6 +102,12 @@ jobs:
           git -C engine log --oneline -1
           ls engine/auto_duo.json
 
+      - name: 安全互鎖（dummy=true 配 mode=live ⇒ 拒跑）
+        if: ${{ github.event.inputs.dummy == 'true' && github.event.inputs.mode != 'dry' }}
+        run: |
+          echo "⛔ dummy=true 只能用 mode=dry（假卡真下單沒有意義，且會把假資料留在 Apple 帳號）"
+          exit 1
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -129,23 +155,25 @@ jobs:
           PROFILE_IDX: ${{ matrix.idx }}
           PROFILE: ""
           SKU: ""
-          AUTO_JSON: auto_duo.json
+          AUTO_JSON: ${{ github.event.inputs.auto_json || 'auto_duo.json' }}
           FULFILLMENT: HOME
-          BUY_COUNT: "2"
+          BUY_COUNT: ${{ github.event.inputs.buy_count || '2' }}
           ENGINE_DIR: engine
           HEADLESS: "1"
           # ⚡ 10/08：入袋是**機率閘**（今天 2 路彩排各 1 發都遇到 http200 但無結帳標記）
-          # ⇒ 把重載/重試次數拉高（生產舊值 3/3 太保守）。
-          ADD_RETRY_ROUNDS: "6"
-          ADD_RETRY_RELOAD_UNTIL: "10"
+          # ⇒ 把重載/重試次數拉高（生產舊值 3/3 太保守）。10/15 起因 workflow input 可調。
+          ADD_RETRY_ROUNDS: ${{ github.event.inputs.add_rounds || '6' }}
+          ADD_RETRY_RELOAD_UNTIL: ${{ github.event.inputs.add_reload || '10' }}
           ADD_RETRY_WAIT_S: "6"
+          # 🧪 假資料模式（假卡＋必配 DRY_RUN；互鎖在 workflow 與 duo_job 兩層）
+          DUMMY_PROFILES: ${{ github.event.inputs.dummy == 'true' && '1' || '0' }}
           # ⚠ GitHub 表達式的空字串是 falsy ⇒ `live && '' || '1'` 恆為 '1'（10/07 實跑抓到的坑：
           # 明明選 live 卻 dry）。改用明確的兩態值：dry⇒true、live⇒false。
           DRY_RUN: ${{ github.event.inputs.mode == 'dry' && 'true' || 'false' }}
           DUO_WAIT_UNTIL: ${{ github.event.inputs.wait_until }}
           DUO_DEADLINE_MIN: ${{ github.event.inputs.deadline_min || '40' }}
-          DUO_MAX_ATTEMPTS: "3"
-          # use_app_config=true ⇒ 不指定款式，照 auto_duo.json 的 candidates 走（App 的下單配置）
+          DUO_MAX_ATTEMPTS: ${{ github.event.inputs.max_attempts || '3' }}
+          # use_app_config=true ⇒ 不指定款式，照 auto_json 的 candidates 走（App 的下單配置）
           USE_APP_CONFIG: ${{ github.event.inputs.use_app_config == 'true' && '1' || '0' }}
         run: |
           set -a; . /tmp/proxy.env; set +a

@@ -2,6 +2,11 @@ name: Duo preflight (readiness only)
 
 # 只印「就緒表」：profiles 的必填欄位檢查＋重複偵測＋出口數量。不下單、不改任何東西。
 # 10/14 備齊 10 組 profile 與出口後跑一次；10/16 T-30 分鐘再跑一次確認。
+#
+# ⚡ 10/15 改版（用戶要求「需從 private repo 取出 masked 版本供我再核對」）：
+#   · 本 repo 是**公開**的 ⇒ 公開 log 只放編號與尾碼（不印姓名/email/地址）
+#   · 帶姓名的完整遮罩表推到**私有** repo：buyip18-checkout 的 status/profiles-masked.json
+#   · 綠燈＝就緒（10 路可跑）；紅燈＝缺欄位/重複卡或地址/出口不足（訊息在 log 尾）
 on:
   workflow_dispatch: {}
 
@@ -11,8 +16,28 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: 就緒表（不印秘密值）
+
+      - name: 就緒表（公開 log：只印編號與尾碼）
         env:
           PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
           SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
         run: python3 tools/duo_preflight.py
+
+      - name: 遮罩表 → 私有 repo（供用戶核對）
+        if: always()
+        env:
+          PROFILES_JSON: ${{ secrets.PROFILES_JSON }}
+          SLOT_PROXIES_JSON: ${{ secrets.SLOT_PROXIES_JSON }}
+          GH_PAT: ${{ secrets.CHECKOUT_PAT }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -e
+          python3 tools/profiles_masked.py --out /tmp/profiles-masked.json
+          python3 - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, "tools")
+          from duo_job import push_private_json
+          d = json.load(open("/tmp/profiles-masked.json", encoding="utf-8"))
+          d["run_url"] = os.environ.get("RUN_URL", "")
+          push_private_json("status/profiles-masked.json", d, "profiles masked export (preflight)")
+          PY

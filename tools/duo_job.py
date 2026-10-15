@@ -305,6 +305,176 @@ def profile_exists():
     return False
 
 
+# ───────────────────────────── 假資料模式（10/15 用戶要求）─────────────────────────────
+# 「10 卡並發 dry run 買 iPhone 18 Pro，要用 dummy data 代替，不要用真 profile 以免真的下單」。
+# 目的：量測**並發 + 全鏈 + 出口**，不是買東西；真 profile（真卡真地址）一個都不碰。
+#
+# 兩道互鎖（缺一即拒跑，見 main）：
+#   ① 卡號全部是各卡組織**公開測試號碼**（Luhn 合法、必被發卡行拒付，不屬於任何真人）
+#   ② 必須同時 DRY_RUN 為真（引擎在 placeOrder 之前就停住）
+# 即使兩道都被誤設成真下單，測試卡也不可能授權成功 ⇒ 不會產生真實訂單/扣款。
+DUMMY_CARDS = [
+    # (品牌, 測試卡號, 到期, 安全碼) — 4 Visa / 4 Mastercard / 2 Amex（AE 一定要有：
+    # 用戶 10/15 要確認 AE 卡支援，AE＝15 位卡號＋4 位安全碼，與其他卡不同形狀）
+    ("Visa",       "4111111111111111", "12/30", "123"),
+    ("Mastercard", "5555555555554444", "12/30", "123"),
+    ("Amex",       "378282246310005",  "12/30", "1234"),
+    ("Visa",       "4012888888881881", "12/30", "123"),
+    ("Mastercard", "5105105105105100", "12/30", "123"),
+    ("Amex",       "371449635398431",  "12/30", "1234"),
+    ("Visa",       "4242424242424242", "12/30", "123"),
+    ("Mastercard", "5200828282828210", "12/30", "123"),
+    ("Visa",       "4000056655665556", "12/30", "123"),
+    ("Mastercard", "2223003122003222", "12/30", "123"),
+]
+DUMMY_ADDR = [
+    "Flat A, 12/F, Block 3, Whampoa Garden, Hung Hom",
+    "Room 801, 8/F, Tower 2, Harbour Place, Tai Kok Tsui",
+    "Flat 5B, 21/F, Block D, Kornhill, Quarry Bay",
+    "Unit 12, 15/F, Chelsea Court, Tsuen Wan",
+    "Flat 3, 9/F, Mount Davis Road 45, Kennedy Town",
+    "Room 1702, 17/F, Metro City Phase 2, Tseung Kwan O",
+    "Flat C, 6/F, Fanling Centre Block 9, Fanling",
+    "Unit 2203, 22/F, Sorrento Tower 6, West Kowloon",
+    "Flat 7A, 14/F, Belvedere Garden Block 2, Tsuen Wan",
+    "Room 505, 5/F, Laguna City Block 21, Lam Tin",
+]
+
+
+def dummy_profiles(n=10):
+    """產生 n 個假 profile（形狀與真 profile 完全相同 ⇒ 引擎不需要任何分支）。"""
+    out = []
+    for i in range(n):
+        brand, pan, exp, cvv = DUMMY_CARDS[i % len(DUMMY_CARDS)]
+        nm = "DUMMY %02d" % (i + 1)
+        out.append({
+            "name": nm,
+            "first_name": "TEST",
+            "last_name": "DUMMY%02d" % (i + 1),
+            "email": "duo.dummy%02d@example.com" % (i + 1),
+            "phone": "5123%04d" % (i + 1),
+            "card_number": pan,
+            "card_expiry": exp,
+            "card_cvv": cvv,
+            "billing_line1": DUMMY_ADDR[i % len(DUMMY_ADDR)],
+            "billing_line2": "",
+            "_dummy_brand": brand,
+        })
+    return {"profiles": out}
+
+
+def is_dry():
+    return str(os.environ.get("DRY_RUN", "")).strip().lower() in ("1", "true", "yes")
+
+
+def enable_dummy_if_requested():
+    """回傳 None=可以繼續；非 None=要中止（並已說明理由）。"""
+    if str(os.environ.get("DUMMY_PROFILES", "")).strip().lower() not in ("1", "true", "yes"):
+        return None
+    if not is_dry():
+        log("⛔ DUMMY_PROFILES=1 必須搭配 DRY_RUN=true —— 用測試卡真下單沒有意義"
+            "（且會把假資料留在 Apple 帳號上）⇒ 拒跑")
+        return 9
+    n = int(os.environ.get("DUMMY_COUNT", "10") or 10)
+    os.environ["PROFILES_JSON"] = json.dumps(dummy_profiles(n), ensure_ascii=False)
+    log("🧪 假資料模式：%d 個 dummy profile（公開測試卡號；Visa/MC 3 位、Amex 4 位安全碼）"
+        "｜DRY_RUN=true 已在引擎內守住 placeOrder" % n)
+    return None
+
+
+EVID_MARKERS = (
+    ("bag", re.compile(r"入袋\s*(\d+)/(\d+)（袋頁實測\s*(\d+)）")),
+    ("add_retry", re.compile(r"入袋重試第\s*(\d+)/(\d+)\s*輪")),
+    ("guest", re.compile(r"訪客完成 URL=(\S+)")),
+    ("shipping_http", re.compile(r"Shipping 兩屏 HTTP 完成\s*([\d.]+)s")),
+    ("shipping_ui", re.compile(r"Shipping HTTP 未果")),
+    ("dry_review", re.compile(r"DRY_RUN ⇒ 停在 review")),
+    ("order_no", ORDER_IN_STDOUT),
+    ("declined", re.compile(r"拒付|declined")),
+)
+
+
+def summarize_out(text):
+    """從引擎 stdout 抽幾個可驗收的欄位（彩排的驗收記錄靠這份，不靠人眼讀 log）。"""
+    d = {"bag": "", "add_retry_rounds": 0, "reached_guest": False, "shipping": "",
+         "dry_review": False, "order_no": "", "declined_seen": False}
+    for line in (text or "").splitlines():
+        m = EVID_MARKERS[0][1].search(line)
+        if m:
+            d["bag"] = "%s/%s（袋頁實測 %s）" % m.groups()
+        m = EVID_MARKERS[1][1].search(line)
+        if m:
+            d["add_retry_rounds"] = max(d["add_retry_rounds"], int(m.group(1)))
+        if EVID_MARKERS[2][1].search(line):
+            d["reached_guest"] = True
+        m = EVID_MARKERS[3][1].search(line)
+        if m:
+            d["shipping"] = "HTTP %ss" % m.group(1)
+        if EVID_MARKERS[4][1].search(line):
+            d["shipping"] = "UI 後備"
+        if EVID_MARKERS[5][1].search(line):
+            d["dry_review"] = True
+        m = EVID_MARKERS[6][1].search(line)
+        if m:
+            d["order_no"] = m.group(1)
+        if EVID_MARKERS[7][1].search(line):
+            d["declined_seen"] = True
+    return d
+
+
+def push_private_json(name, obj, message):
+    """把一份 JSON 推到**私有** repo（公開 repo 一個字都不放）。失敗只記 log，不影響流程。"""
+    pat = (os.environ.get("GH_PAT") or os.environ.get("CHECKOUT_PAT") or "").strip()
+    if not pat:
+        return False
+    try:
+        content = json.dumps(obj, ensure_ascii=False, indent=1)
+        body = {"message": message, "content": base64.b64encode(content.encode()).decode(),
+                "branch": "main"}
+        try:
+            meta = gh("GET", API + name) or "{}"
+            body["sha"] = json.loads(meta).get("sha", "")
+        except Exception:
+            pass
+        gh("PUT", API + name, data=body)
+        log("證據已推（私有）：%s" % name)
+        return True
+    except Exception as e:
+        log("證據推送失敗 %s：%r" % (name, e))
+        return False
+
+
+def record_dry_evidence(idx, summary, out_text):
+    """彩排（DUMMY/DRY_RUN）時，把每路的驗收記錄落成私有 repo 的一份 JSON。"""
+    if not (is_dry() or os.environ.get("DUMMY_PROFILES")):
+        return
+    run_id = os.environ.get("GITHUB_RUN_ID", "local")
+    try:
+        latest = json.loads(open(os.path.join(ENGINE, "status", "latest.json"),
+                                 encoding="utf-8").read())
+    except Exception:
+        latest = {}
+    ev = {
+        "run_id": run_id, "run_url": os.environ.get("RUN_URL", ""),
+        "slot": idx, "profile": os.environ.get("PROFILE", ""), "sku": os.environ.get("SKU", ""),
+        "auto_json": os.environ.get("AUTO_JSON", ""), "dummy": bool(os.environ.get("DUMMY_PROFILES")),
+        "dry_run": True, "elapsed_s": round(time.time() - T0, 1),
+        "summary": summary,
+        "state": latest.get("state", ""), "review": latest.get("review", ""),
+        "done_at": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))
+                                        ).strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+        "log_tail": (latest.get("log_tail") or [])[-30:],
+        "shots": sorted(f for f in (os.listdir(os.path.join(ENGINE, "status"))
+                                    if os.path.isdir(os.path.join(ENGINE, "status")) else [])
+                        if f.startswith("shot-") and f.endswith(".png"))[-4:],
+    }
+    # 驗收判定（一路一列，人不用讀 log）
+    ok = bool(summary.get("dry_review")) and latest.get("state") == "review"
+    ev["verdict"] = "PASS" if ok else ("ORDER?" if summary.get("order_no") else "FAIL")
+    push_private_json("status/dry-%s-slot%02d.json" % (run_id, idx), ev,
+                      "dry rehearsal slot %02d (profile=%s)" % (idx, os.environ.get("PROFILE", "")))
+
+
 def notify(title, msg, priority=0):
     """手機通知（Pushover 優先、Bark 次之）。任何失敗都不影響流程。"""
     import urllib.parse
@@ -345,6 +515,11 @@ def main():
     # `event=order` 會被當成「歷史」而看不到 ⇒ 迴圈以為沒成立 ⇒ 再打一發 ⇒ **雙單**。
     # 當晚真的發生了：W1948022250（第 1 發）＋ W1518897851（第 2 發）。
     ledger_rows()
+    # 🧪 假資料模式（必須先於任何 profile 解析，因為它會直接替換 PROFILES_JSON）
+    _abort = enable_dummy_if_requested()
+    if _abort is not None:
+        notify("Duo job 拒跑", "DUMMY_PROFILES=1 必須搭配 DRY_RUN=true（安全互鎖）")
+        return _abort
     # 路號模式：先解出 profile 名與款式（都不需要跨 job 傳秘密）
     idx_name = resolve_by_index()
     if idx_name == "":
@@ -366,6 +541,7 @@ def main():
     wait_until(os.environ.get("DUO_WAIT_UNTIL", ""))
     deadline = T0 + int(os.environ.get("DUO_DEADLINE_MIN", "25")) * 60
     n = 0
+    last_out = ""
     while True:
         n += 1
         out = ""
@@ -373,6 +549,8 @@ def main():
             out = run_engine_once(n) or ""
         except subprocess.TimeoutExpired:
             log("引擎逾時（30 分）⇒ 視為失敗，續試")
+        if out:
+            last_out = out
         o = order_from_stdout(out)
         if o:
             log("✅ 訂單成立（引擎 stdout）：%s（第 %d 發）" % (o, n))
@@ -422,6 +600,13 @@ def main():
         time.sleep(15)
     push_ledger()
     push_shots()
+    _sum = summarize_out(last_out)
+    log("本路摘要：" + json.dumps(_sum, ensure_ascii=False))
+    try:
+        _idx = int(os.environ.get("PROFILE_IDX") or -1)
+    except Exception:
+        _idx = -1
+    record_dry_evidence(_idx, _sum, last_out)
     log("本 job 結束（共 %d 發）" % n)
     return 0
 
