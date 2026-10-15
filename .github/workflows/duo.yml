@@ -60,6 +60,9 @@ on:
       add_mode:
         description: "入袋方式：留空=頁面內 fetch（預設）；ui=真 UI 點擊（選規格＋按加入購物袋）"
         default: ""
+      max_parallel:
+        description: "同時跑幾路（留空=10）。逐出口隔離測試時填 1（避免並發互相干擾）"
+        default: ""
   # ⏸ 2026-10-07 用戶指示「先暫停一切任務」⇒ 定時觸發**先關掉**，避免 10/16 自動開火
   # （卡未就緒、10 組 profile/出口未備妥）。恢復時把下面兩行取消註解即可：
   # schedule:
@@ -90,7 +93,8 @@ jobs:
     timeout-minutes: 75
     strategy:
       fail-fast: false
-      max-parallel: 10
+      # ⚡ 10/15：逐出口隔離測試（max_parallel=1）用 input 控制；預設 10 路並發
+      max-parallel: ${{ github.event.inputs.max_parallel || 10 }}
       # ⚡ 10/08：matrix 只帶**路號**（靜態、不含任何秘密）。GitHub 會擋「可能含 secret」的
       # job output（實測警告 `Skip output 'matrix' since it may contain secret.` ⇒ matrix 變空
       # ⇒ 整個 run 失敗），所以 profile 名與款式改由**每個 job 自己在 runner 內**讀 secret 決定。
