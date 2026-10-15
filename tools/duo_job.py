@@ -342,10 +342,22 @@ DUMMY_ADDR = [
 # 姓名用**純字母**（有些表單會擋數字）且每路不同（避免第 5 路起被當成同一顧客）
 DUMMY_LAST = ["ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO",
               "FOXTROT", "GOLF", "HOTEL", "INDIA", "JULIET"]
+# 屋苑/大廈/座數/樓層/單位（Apple HK 送貨表單有這一欄；留空可能過不了驗證）
+DUMMY_UNIT = ["Block 3, 12/F, Flat A", "Tower 2, 8/F, Room 801", "Block D, 21/F, Flat 5B",
+              "Chelsea Court, 15/F, Unit 12", "45 Mount Davis Road, 9/F, Flat 3",
+              "Metro City Ph 2, 17/F, Room 1702", "Block 9, 6/F, Flat C",
+              "Sorrento Tower 6, 22/F, Unit 2203", "Block 2, 14/F, Flat 7A",
+              "Block 21, 5/F, Room 505"]
 
 
 def dummy_profiles(n=10):
-    """產生 n 個假 profile（形狀與真 profile 完全相同 ⇒ 引擎不需要任何分支）。"""
+    """產生 n 個假 profile（形狀與真 profile 完全相同 ⇒ 引擎不需要任何分支）。
+
+    ⚡ 10/15 修正：原本 email 用 `@example.com`（保留域名）。實測那條路在**送貨步驟**
+    過不去（Shipping 兩屏回 200 但伺服器狀態沒前進，Billing-init 又回到送貨頁）
+    ⇒ 改用**看起來正常**的域名，並補上 Apple HK 送貨表單的「屋苑/大廈/座數/樓層/單位」欄。
+    （DRY_RUN 不會成立訂單 ⇒ 不會有任何郵件寄出。）
+    """
     out = []
     for i in range(n):
         brand, pan, exp, cvv = DUMMY_CARDS[i % len(DUMMY_CARDS)]
@@ -354,13 +366,13 @@ def dummy_profiles(n=10):
             "name": "TEST %s" % last,
             "first_name": "TEST",
             "last_name": last,
-            "email": "duo.dummy%02d@example.com" % (i + 1),
+            "email": "bip18.rehearsal%02d@gmail.com" % (i + 1),
             "phone": "5123%04d" % (i + 1),
             "card_number": pan,
             "card_expiry": exp,
             "card_cvv": cvv,
             "billing_line1": DUMMY_ADDR[i % len(DUMMY_ADDR)],
-            "billing_line2": "",
+            "billing_line2": DUMMY_UNIT[i % len(DUMMY_UNIT)],
             "_dummy_brand": brand,
         })
     return {"profiles": out}
