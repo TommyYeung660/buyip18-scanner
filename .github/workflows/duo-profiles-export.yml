@@ -8,12 +8,14 @@ name: Duo profiles export (一次：給插件匯入用)
 #   · 只寫私有 repo `TommyYeung660/buyip18-checkout` 的 `status/profiles-export.json`
 #   · 公開 repo 一個字都不放；log 只印筆數
 #   · 匯入插件後如果要，我可以把它移走（改放進 `attic/` 或換成遮罩版）
+# ⛔ 2026-10-15 變更：完整版匯出**永久關閉**（用戶已要求把該 blob 從 repo 歷史清除）。
+#    這支工作流現在只寫 `status/profiles-export-masked.json`（無卡號/CVV）；
 on:
   workflow_dispatch:
     inputs:
       mask:
-        description: "true=只匯出遮罩版（無卡號/CVV，僅供核對）；false=完整版（供匯入）"
-        default: "false"
+        description: "（已鎖定 true）只出遮罩版；完整版已於 10/15 從 repo 歷史清除，不再提供"
+        default: "true"
 
 jobs:
   export:
@@ -36,7 +38,7 @@ jobs:
           raw = os.environ.get("PROFILES_JSON") or "{}"
           d = json.loads(raw)
           n = len(d.get("profiles") or [])
-          if os.environ.get("MASK") == "true":
+          if True:   # ⚠ 10/15 起**只出遮罩版**：完整版曾被寫進 repo，已改寫歷史清除；不再提供
               keep_out = ("card_number", "card_cvv")
               profs = []
               for p in (d.get("profiles") or []):
