@@ -491,7 +491,11 @@ def record_dry_evidence(idx, summary, out_text):
                         if f.startswith("shot-") and f.endswith(".png"))[-4:],
     }
     # 驗收判定（一路一列，人不用讀 log）
-    ok = bool(summary.get("dry_review")) and latest.get("state") == "review"
+    # ⚠ 引擎有兩個終態寫入點：流程結束寫 "review"，main() 收尾再覆寫成 "dry-run"
+    #   ⇒ 兩個都要算通過（10/15 實測：明明走完全鏈，卻被這裡判成 FAIL，白緊張一次）。
+    _st = str(latest.get("state") or "")
+    ok = bool(summary.get("dry_review")) and (_st in ("review", "dry-run")
+                                              or latest.get("review") is True)
     ev["verdict"] = "PASS" if ok else ("ORDER?" if summary.get("order_no") else "FAIL")
     push_private_json("status/dry-%s-slot%02d.json" % (run_id, idx), ev,
                       "dry rehearsal slot %02d (profile=%s)" % (idx, os.environ.get("PROFILE", "")))
