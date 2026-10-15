@@ -1,0 +1,39 @@
+name: Duo exit health (逐出口體檢)
+
+# ⚡ 10/15：本機網路**擋掉對外 port 12323**（portquiz 443 OK、12323 不通）⇒ 代理只能在 runner 上測。
+# 這支工作流對「一組出口」逐個量三件事（不下單、不碰 profile）：
+#   1. egress IP／地區（透過該出口打 ipinfo）    2. 真站商品頁可達性（HTTP/位元組/耗時）
+#   3. 頁面指紋（partNumber／dimensionColor／add-to-cart 是否在）
+#
+# proxy_source=main ⇒ 用正式 secret SLOT_PROXIES_JSON（當晚 18:30 體檢用）
+# proxy_source=new  ⇒ 用 SLOT_PROXIES_JSON_NEW（新買的出口，尚未併入正式清單時用）
+on:
+  workflow_dispatch:
+    inputs:
+      proxy_source:
+        description: "main=正式 SLOT_PROXIES_JSON；new=SLOT_PROXIES_JSON_NEW（新買的）"
+        default: "new"
+      url:
+        description: "要測的商品頁（預設 Duo）"
+        default: "https://www.apple.com/hk-zh/shop/buy-iphone/iphone-duo"
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 逐出口體檢
+        env:
+          LIST_MAIN: ${{ secrets.SLOT_PROXIES_JSON }}
+          LIST_NEW: ${{ secrets.SLOT_PROXIES_JSON_NEW }}
+          SRC: ${{ github.event.inputs.proxy_source }}
+        run: |
+          set -e
+          if [ "$SRC" = "main" ]; then export SLOT_PROXIES_JSON="$LIST_MAIN"; else export SLOT_PROXIES_JSON="$LIST_NEW"; fi
+          python3 -c "import json,os;print('出口數:',len(json.loads(os.environ['SLOT_PROXIES_JSON'] or '[]')))"
+          python3 tools/exit_health.py --url "${{ github.event.inputs.url }}"
+        continue-on-error: true
