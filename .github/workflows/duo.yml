@@ -57,6 +57,9 @@ on:
       proxy_map:
         description: "出口索引循環表（例 0,1,2,3,4 ⇒ 路 i 用第 i%5 個出口）—出口不足時分兩波跑"
         default: ""
+      add_mode:
+        description: "入袋方式：留空=頁面內 fetch（預設）；ui=真 UI 點擊（選規格＋按加入購物袋）"
+        default: ""
   # ⏸ 2026-10-07 用戶指示「先暫停一切任務」⇒ 定時觸發**先關掉**，避免 10/16 自動開火
   # （卡未就緒、10 組 profile/出口未備妥）。恢復時把下面兩行取消註解即可：
   # schedule:
@@ -212,6 +215,8 @@ jobs:
           # ⚡ 10/15：Apple 當晚若改商品頁網址／改路徑，用這兩個 input 就地改目標（免改碼、免重推 repo）
           DUO_PRODUCT_URL: ${{ github.event.inputs.product_url }}
           DUO_LINE_MARKER: ${{ github.event.inputs.line_marker }}
+          # 入袋方式（空=頁面內 fetch；ui=真 UI 點擊）
+          ADD_MODE: ${{ github.event.inputs.add_mode }}
         run: |
           set -a; . /tmp/proxy.env; set +a
           export PROFILES_JSON="$(cat /tmp/profiles.json)"
