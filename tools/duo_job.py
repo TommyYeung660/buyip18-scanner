@@ -614,6 +614,15 @@ def main():
             notify("Duo job 拒跑（已有訂單）",
                    "%s｜已有訂單 %s ⇒ 未再下單" % (os.environ.get("PROFILE", ""), _no), priority=-1)
             return 10
+    # 🛡 出口硬閘（10/15 彩排實證：runner 機房 IP 直連 ⇒ 入袋 100% 541、5 路各 24 發全滅）。
+    # 沒有出口的路不但注定失敗，還會在 log 裡製造「541 洪水」的假訊號，掩蓋真正的原因。
+    if not (os.environ.get("DUO_PROXY_SERVER") or "").strip() \
+            and str(os.environ.get("ALLOW_DIRECT", "")).strip() != "1":
+        log("⛔ 本路沒有出口（DUO_PROXY_SERVER 空）⇒ 拒跑（機房 IP 直連實測 100% 入袋失敗）；"
+            "要刻意直連請設 ALLOW_DIRECT=1")
+        notify("Duo job 拒跑（無出口）", "路 %s 沒有指定出口 ⇒ 未跑（避免製造 541 假訊號）"
+               % os.environ.get("PROFILE_IDX", "?"))
+        return 11
     wait_until(os.environ.get("DUO_WAIT_UNTIL", ""))
     deadline = T0 + int(os.environ.get("DUO_DEADLINE_MIN", "25")) * 60
     n = 0
