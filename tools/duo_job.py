@@ -437,28 +437,36 @@ def summarize_out(text):
     return d
 
 
-def push_private_bytes(name, blob, message):
-    """把**二進位**檔推到**私有** repo（截圖、gzip HTML）——GitHub 上可直接看圖。
+def push_private_bytes(name, blob, message, tries=3):
+    """把**二進位**檔推到**私有** repo（截圖、gzip HTML、證據 JSON）——GitHub 上可直接看圖。
 
     公開 repo 一個字都不放。失敗只記 log，不影響流程。
+
+    ⚡ 10/15：10 路並發時實測有 2 路的證據檔**沒推上去**（同時對同一個 repo 寫入 ⇒ 有時
+    422/409）⇒ 改成重試 3 次（每次重新讀 sha）。當晚的帳本／截圖走同一條路，這個保險值得。
     """
     pat = (os.environ.get("GH_PAT") or os.environ.get("CHECKOUT_PAT") or "").strip()
     if not pat:
         return False
-    try:
-        body = {"message": message,
-                "content": base64.b64encode(blob).decode(), "branch": "main"}
+    last = None
+    for k in range(max(1, tries)):
         try:
-            meta = gh("GET", API + name) or "{}"
-            body["sha"] = json.loads(meta).get("sha", "")
-        except Exception:
-            pass
-        gh("PUT", API + name, data=body)
-        log("已推（私有）：%s（%d bytes）" % (name, len(blob)))
-        return True
-    except Exception as e:
-        log("推送失敗 %s：%r" % (name, e))
-        return False
+            body = {"message": message,
+                    "content": base64.b64encode(blob).decode(), "branch": "main"}
+            try:
+                meta = gh("GET", API + name) or "{}"
+                body["sha"] = json.loads(meta).get("sha", "")
+            except Exception:
+                pass
+            gh("PUT", API + name, data=body)
+            log("已推（私有）：%s（%d bytes）%s" % (name, len(blob),
+                                                "" if k == 0 else "（第 %d 次成功）" % (k + 1)))
+            return True
+        except Exception as e:
+            last = e
+            time.sleep(2 + 2 * k)
+    log("推送失敗（已試 %d 次）%s：%r" % (tries, name, last))
+    return False
 
 
 def push_private_json(name, obj, message):
