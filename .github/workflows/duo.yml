@@ -75,7 +75,10 @@ on:
   #   - cron: "50 11 16 10 *"   # 2026-10-16 19:50 HKT 起跑，job 內等到 20:00
 
 concurrency:
-  group: duo-orders
+  # ⚡ 10/16：**依 slots 值分組** ⇒ 第一波（slots 留空＝main）與第二波（slots=10,11,12）
+  # 可以**同時跑**。原本固定 `duo-orders` 會讓第二波排隊等第一波跑完（20:40 才開始），
+  # 那就違背「一有 3 路成功就盡快補 #11-13」的目的。同一個 slots 值仍會排隊（防重複派工）。
+  group: duo-orders-${{ github.event.inputs.slots || 'main' }}
   cancel-in-progress: false
 
 jobs:
