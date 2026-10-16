@@ -118,6 +118,13 @@ jobs:
           - { idx: 7 }
           - { idx: 8 }
           - { idx: 9 }
+          # ⚡ 10/16：profile 已有 13 個，但出口只有 10 個 ⇒ 只把矩陣加出來（10-12 路），
+          # **不要**在沒有指定 slots 時跑它們（會因「沒有出口」被 duo_job 直接拒跑 return 11）。
+          # 用法：第一波跑完後，第二波 dispatch 帶 `slots=10,11,12` ＋ `proxy_map=0,1,2`
+          # （重用前三個乾淨出口，一 profile 一出口）。
+          - { idx: 10 }
+          - { idx: 11 }
+          - { idx: 12 }
     steps:
       - uses: actions/checkout@v4
 
