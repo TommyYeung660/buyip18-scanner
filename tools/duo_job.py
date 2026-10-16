@@ -79,23 +79,25 @@ def wait_until(iso, lead_s=90):
     log("起跑（T-0 目標 %s）" % t.isoformat())
 
 
-def arm_url():
+def arm_urls():
     """要輪詢「開賣了沒」的商品頁 URL。
 
     優先序：DUO_ARM_URL（workflow input `product_url`）→ 由引擎的 AUTO_JSON 推導
     （`model_slug` ⇒ https://www.apple.com/hk-zh/shop/<slug>）。
     """
-    u = (os.environ.get("DUO_ARM_URL") or "").strip()
-    if u:
-        return u
+    # ⚡ 10/16：可給多個入口（逗號分隔）——Apple 開賣前後有 /shop/goto/buy_iphone/iphone_duo
+    # 與 /shop/buy-iphone/iphone-duo 兩條；任一顯示「已開賣」就放行。
+    us = [x.strip() for x in (os.environ.get("DUO_ARM_URL") or "").split(",") if x.strip()]
+    if us:
+        return us
     try:
         slug = json.loads(open(os.path.join(ENGINE, os.environ.get("AUTO_JSON", "auto_duo.json")),
                                encoding="utf-8").read()).get("model_slug")
         if slug:
-            return "https://www.apple.com/hk-zh/shop/" + str(slug).strip("/")
+            return ["https://www.apple.com/hk-zh/shop/" + str(slug).strip("/")]
     except Exception:
         pass
-    return ""
+    return []
 
 
 # 「還沒開賣」的**網頁字樣**（10/15 實測：Duo 頁的 hero 寫「10 月 16 日晚上 8 時起接受預訂」，
@@ -121,8 +123,8 @@ def arm_until_live():
 
     fail-open：連續失敗 30 次或逾時 ⇒ 直接交給引擎原本的重試（行為與今天相同，不會更差）。
     """
-    url = arm_url()
-    if not url:
+    urls = arm_urls()
+    if not urls:
         return None
     poll = float(os.environ.get("DUO_ARM_POLL_S", "3") or 3)
     timeout = float(os.environ.get("DUO_ARM_TIMEOUT_S", "900") or 900)
@@ -140,15 +142,26 @@ def arm_until_live():
     op.addheaders = [("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36"),
                      ("Accept-Language", "zh-HK,zh;q=0.9,en;q=0.8")]
-    log("⏳ 開賣偵測：每 %.1fs 輪詢 %s（最多 %.0fs；走本路出口）" % (poll, url, timeout))
+    log("⏳ 開賣偵測：每 %.1fs 輪詢 %d 個入口（%s）（最多 %.0fs；走本路出口）"
+        % (poll, len(urls), ",".join(u.split("apple.com")[-1] for u in urls), timeout))
     t0, errs, seen_wait, n = time.time(), 0, [], 0
     while time.time() - t0 < timeout:
         n += 1
+        _htmls = []
         try:
-            with op.open(url, timeout=25) as r:
-                html = r.read().decode("utf-8", "replace")
-            _notlive = [k for k in ARM_NOTLIVE if k in html]
-            if (not _notlive) and any(k in html for k in ARM_PAGE_OK):
+            for _u in urls:
+                with op.open(_u, timeout=25) as r:
+                    _htmls.append(r.read().decode("utf-8", "replace"))
+            html = "\n".join(_htmls)
+            # 「任何一個入口」是活的就算開賣：逐一檢查每個入口自己的字樣
+            _live_seen = False
+            _notlive = []
+            for _h in _htmls:
+                _nl = [k for k in ARM_NOTLIVE if k in _h]
+                if (not _nl) and any(k in _h for k in ARM_PAGE_OK):
+                    _live_seen = True
+                _notlive.extend(_nl)
+            if _live_seen:
                 if seen_wait:
                     log("🟢 商品頁已開賣（等了 %.1fs／%d 輪；等候頁字樣曾見：%s）"
                         % (time.time() - t0, n, ",".join(seen_wait[:3])))
